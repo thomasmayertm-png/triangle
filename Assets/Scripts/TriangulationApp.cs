@@ -112,7 +112,7 @@ public class TriangulationApp : MonoBehaviour
     // =====================================================================
     //  INPUT  —  drag points around
     // =====================================================================
-    Rect panelRect = new Rect(10, 10, 330, 250); // OnGUI panel, in top-left coords
+    Rect panelRect = new Rect(10, 10, 640, 470); // OnGUI panel, in top-left coords
 
     void Update()
     {
@@ -245,7 +245,7 @@ public class TriangulationApp : MonoBehaviour
     void OnGUI()
     {
         if (label == null)
-            label = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold };
+            label = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
 
         Vector2 A = pts[0], B = pts[1], T = pts[2];
 
@@ -286,8 +286,9 @@ public class TriangulationApp : MonoBehaviour
 
         GUILayout.Space(6);
         GUILayout.Label($"Bearing noise: {noiseDeg:0.0}°", label);
-        noiseDeg = GUILayout.HorizontalSlider(noiseDeg, 0f, 15f);
-        if (GUILayout.Button("New noise sample"))
+        noiseDeg = GUILayout.HorizontalSlider(noiseDeg, 0f, 15f, GUILayout.Height(30));
+        GUILayout.Space(6);
+        if (GUILayout.Button("New noise sample", Btn(), GUILayout.Height(50)))
         {
             // fresh unit-normal samples via Box–Muller (two uniforms -> two normals)
             float u1 = Mathf.Max(1e-6f, Random.value), u2 = Random.value;
@@ -298,11 +299,12 @@ public class TriangulationApp : MonoBehaviour
         GUILayout.EndArea();
     }
 
-    GUIStyle _rich, _col;
-    GUIStyle Rich() { if (_rich == null) _rich = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 13 }; return _rich; }
+    GUIStyle _rich, _col, _btn;
+    GUIStyle Rich() { if (_rich == null) _rich = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 26 }; return _rich; }
+    GUIStyle Btn() { if (_btn == null) _btn = new GUIStyle(GUI.skin.button) { fontSize = 26 }; return _btn; }
     GUIStyle Colored(float err)
     {
-        if (_col == null) _col = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold };
+        if (_col == null) _col = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
         _col.normal.textColor = err < 0 ? Color.gray : Color.Lerp(Color.green, Color.red, Mathf.Clamp01(err / 3f));
         return _col;
     }
