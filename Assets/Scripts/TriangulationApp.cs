@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.IO;
 
 // =============================================================================
 //  POSITION-FIXING PLAYGROUND  —  Method 1: TRIANGULATION (bearing based)
@@ -53,6 +54,11 @@ public class TriangulationApp : MonoBehaviour
                                          // steady while you drag, not flickering)
 
     int dragIdx = -1;                    // which point is being dragged (-1 = none)
+
+    // --- TEMP DIAGNOSTIC (instrument-first): prove whether the button fires ---
+    int clicks = 0;                      // how many times the button handler ran
+    string logPath => Path.Combine(Application.dataPath, "..", "debug_noise.log");
+    void Log(string m) { try { File.AppendAllText(logPath, System.DateTime.Now.ToString("HH:mm:ss.fff") + "  " + m + "\n"); } catch { } }
     const float mapSpan = 26f;           // how many map units span the short screen axis
     float ppu;                           // pixels per map unit (recomputed each frame)
 
@@ -112,7 +118,7 @@ public class TriangulationApp : MonoBehaviour
     // =====================================================================
     //  INPUT  —  drag points around
     // =====================================================================
-    Rect panelRect = new Rect(10, 10, 640, 470); // OnGUI panel, in top-left coords
+    Rect panelRect = new Rect(10, 10, 640, 540); // OnGUI panel, in top-left coords
 
     void Update()
     {
@@ -236,9 +242,11 @@ public class TriangulationApp : MonoBehaviour
     void Lbl(Vector2 mMap, string text, Color c)
     {
         Vector2 p = MapToPix(mMap);
+        // Box must be at least as tall as the font, or the glyphs get clipped.
+        float h = label.fontSize + 12f;
         // GL/pixel space is +y up, but OnGUI is +y down → flip y for placement.
-        var r = new Rect(p.x + 10, Screen.height - p.y - 10, 200, 22);
-        var s = new GUIStyle(label); s.normal.textColor = c;
+        var r = new Rect(p.x + 10, Screen.height - p.y - h * 0.5f, 260, h);
+        var s = new GUIStyle(label); s.normal.textColor = c; s.alignment = TextAnchor.MiddleLeft;
         GUI.Label(r, text, s);
     }
 
@@ -295,7 +303,12 @@ public class TriangulationApp : MonoBehaviour
             float mag = Mathf.Sqrt(-2f * Mathf.Log(u1));
             gA = mag * Mathf.Cos(2f * Mathf.PI * u2);
             gB = mag * Mathf.Sin(2f * Mathf.PI * u2);
+            clicks++;
+            Log($"CLICK #{clicks}  noise={noiseDeg:0.00}  gA={gA:0.000}  gB={gB:0.000}");
         }
+
+        // TEMP DIAGNOSTIC readout — remove once we've proven the cause.
+        GUILayout.Label($"[dbg] clicks={clicks}  gA={gA:0.00}  gB={gB:0.00}  noise={noiseDeg:0.0}", label);
         GUILayout.EndArea();
     }
 
