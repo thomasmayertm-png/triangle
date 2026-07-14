@@ -15,3 +15,6 @@
 *.suo
 .vs/
 .idea/
+
+# temp diagnostics
+debug_noise.log

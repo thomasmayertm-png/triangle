@@ -1,43 +1,35 @@
 using UnityEngine;
-using System.IO;
 
 // =============================================================================
-//  POSITION-FIXING PLAYGROUND  —  Method 1: TRIANGULATION (bearing based)
+//  POSITION-FIXING PLAYGROUND
+//  Method 1: TRIANGULATION (bearings)   Method 2: TRILATERATION (ranges / GPS)
 // -----------------------------------------------------------------------------
-//  Two known stations (A, B) each measure a BEARING (compass direction) to an
-//  unknown target. The target must lie somewhere along each bearing line, so the
-//  fix is where the two lines CROSS. We reconstruct it two equivalent ways and
-//  show they agree:
-//      (a) line-line intersection  (the geometry)
-//      (b) the LAW OF SINES         (the algebra you'd do by hand)
+//  METHOD 1 — each of two known stations measures a BEARING (compass angle) to
+//  the target. The target lies on each bearing line, so the fix is where the two
+//  lines cross. Reconstructed via line intersection == the law of sines.
 //
-//  Drag A, B or the true target with the mouse; every line and number updates
-//  live. The NOISE slider perturbs the measured bearings so you can watch the
-//  clean crossing point wander away from the truth — that error is what later
-//  methods (least-squares) are built to tame.
+//  METHOD 2 — each of THREE known stations measures a DISTANCE (range) to the
+//  target. Draw a circle of that radius around each station; the target is where
+//  the circles meet. This is how GPS works (satellites = stations, radio travel
+//  time = range). Two circles are ambiguous (they cross in two places); the third
+//  circle pins down the single answer.
 //
-//  PROGRAMMING NOTES (for someone new to Unity/C#):
-//   * [RuntimeInitializeOnLoadMethod] is a Unity hook: the tagged static method
-//     runs automatically when you press Play, BEFORE anything else. We use it to
-//     build the camera + this component from nothing, so there is no scene to
-//     wire up by hand.
-//   * OnPostRender() is called by the camera right after it draws the frame; it
-//     is where we do immediate-mode "GL" drawing (lines/points straight to the
-//     screen). Only works on the Built-in Render Pipeline, which is why we keep
-//     the project on it.
-//   * OnGUI() is Unity's old "immediate mode" UI. It is ugly but zero-setup and
-//     perfect for throwaway sliders, toggles and floating text labels.
+//  Drag any station or the true target; every line, circle and number updates
+//  live. The NOISE slider corrupts the measurements so the clean crossing point
+//  turns fuzzy — the motivation for the least-squares method to come.
+//
+//  Switch methods with the buttons in the panel. "Show working" reveals the
+//  underlying geometry (the triangle for M1, the radical lines for M2).
 // =============================================================================
 public class TriangulationApp : MonoBehaviour
 {
-    // ---- Bootstrap ----------------------------------------------------------
-    // Runs once when Play starts. Creates a camera and attaches this script.
+    // ---- Bootstrap: build camera + this component when Play starts ----------
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Boot()
     {
         var go = new GameObject("PositionFixingApp");
         var cam = go.AddComponent<Camera>();
-        cam.orthographic = true;                         // top-down 2D, no perspective
+        cam.orthographic = true;
         cam.clearFlags = CameraClearFlags.SolidColor;
         cam.backgroundColor = new Color(0.07f, 0.08f, 0.10f);
         cam.transform.position = new Vector3(0, 0, -10);
@@ -45,30 +37,37 @@ public class TriangulationApp : MonoBehaviour
         go.AddComponent<TriangulationApp>();
     }
 
-    // ---- Model state (everything is in "map units", think metres) -----------
-    // pts[0] = Station A, pts[1] = Station B, pts[2] = TRUE target position.
-    Vector2[] pts = { new Vector2(-6f, -4f), new Vector2(6f, -4f), new Vector2(1.5f, 5f) };
+    // ---- Model state (map units ~ metres) -----------------------------------
+    //  pts[0]=A  pts[1]=B  pts[2]=TRUE target  pts[3]=C
+    //  (target kept at index 2 so Method-1 code is unchanged; C is index 3.)
+    Vector2[] pts = { new Vector2(-6f, -4f), new Vector2(6f, -4f), new Vector2(1.5f, 5f), new Vector2(-3f, 8f) };
 
-    float noiseDeg = 0f;                 // std-dev of bearing error, degrees
-    float gA = 0.6f, gB = -0.9f;         // fixed unit-normal samples (so noise is
-                                         // steady while you drag, not flickering)
+    int method = 1;                      // 1 = bearings, 2 = ranges
+    bool showWork = false;               // reveal the underlying geometry
 
-    int dragIdx = -1;                    // which point is being dragged (-1 = none)
+    float noiseDeg = 0f;                 // Method-1 bearing noise, std-dev degrees
+    float noiseUnit = 0f;                // Method-2 range   noise, std-dev units
+    float gA = 0.6f, gB = -0.9f, gC = 0.4f; // fixed unit-normal samples per station
 
-    // --- TEMP DIAGNOSTIC (instrument-first): prove whether the button fires ---
-    int clicks = 0;                      // how many times the button handler ran
-    string logPath => Path.Combine(Application.dataPath, "..", "debug_noise.log");
-    void Log(string m) { try { File.AppendAllText(logPath, System.DateTime.Now.ToString("HH:mm:ss.fff") + "  " + m + "\n"); } catch { } }
-    const float mapSpan = 26f;           // how many map units span the short screen axis
-    float ppu;                           // pixels per map unit (recomputed each frame)
+    int dragIdx = -1;
+    const float mapSpan = 26f;
+    float ppu;
 
-    Material glMat;                      // material used for GL immediate drawing
+    Material glMat;
+
+    // Colours reused by both the GL drawing and the text labels.
+    static readonly Color cA = new Color(0.30f, 0.75f, 1.00f);   // Station A  blue
+    static readonly Color cB = new Color(1.00f, 0.55f, 0.25f);   // Station B  orange
+    static readonly Color cC = new Color(1.00f, 0.85f, 0.25f);   // Station C  yellow
+    static readonly Color cTrue = new Color(0.35f, 1.00f, 0.45f);// true       green
+    static readonly Color cEst = new Color(1.00f, 0.25f, 0.45f); // fix        red
+    static readonly Color cBase = new Color(1, 1, 1, 0.30f);
+
+    // Station indices that the current method uses (target is always index 2).
+    int[] Stations() => method == 1 ? new[] { 0, 1 } : new[] { 0, 1, 3 };
 
     // =====================================================================
-    //  COORDINATE TRANSFORM  (map units  <->  screen pixels)
-    //  We invent our own 2D world and place map-origin at screen centre.
-    //  Pixel space here is bottom-left origin, +y up — same as GL and
-    //  Input.mousePosition, so no axis flipping is needed for those.
+    //  COORDINATE TRANSFORM  (map units <-> screen pixels, +y up like GL)
     // =====================================================================
     Vector2 MapToPix(Vector2 m) => new Vector2(Screen.width * 0.5f + m.x * ppu,
                                                Screen.height * 0.5f + m.y * ppu);
@@ -79,61 +78,88 @@ public class TriangulationApp : MonoBehaviour
     //  MATHS HELPERS
     // =====================================================================
 
-    // Compass bearing of a direction vector, degrees clockwise from North (+y).
-    //   WHY: navigators measure angles clockwise from north, not the usual math
-    //   convention (counter-clockwise from +x). atan2(x, y) instead of the usual
-    //   atan2(y, x) swaps the axes to give exactly that.
+    // Compass bearing (deg clockwise from North/+y). atan2(x,y) swaps the usual
+    // axes so 0°=North and angles increase clockwise, like a real compass.
     static float Bearing(Vector2 dir) =>
         Mathf.Repeat(Mathf.Atan2(dir.x, dir.y) * Mathf.Rad2Deg, 360f);
-
-    // Unit direction vector for a compass bearing (inverse of Bearing()).
     static Vector2 Dir(float bearingDeg)
     {
         float r = bearingDeg * Mathf.Deg2Rad;
-        return new Vector2(Mathf.Sin(r), Mathf.Cos(r)); // note: (sin, cos), not (cos, sin)
+        return new Vector2(Mathf.Sin(r), Mathf.Cos(r));
     }
 
-    // 2D "cross product": the z of the 3D cross of (u,0) x (v,0).
-    // It equals |u||v|sin(angle). Zero => u and v are parallel.
+    // 2D cross product = |u||v|sin(angle); zero when u,v parallel.
     static float Cross(Vector2 u, Vector2 v) => u.x * v.y - u.y * v.x;
 
-    // Intersect two lines given as point+direction:  a + t*da  =  b + s*db.
-    //   WHY it works: subtract to get (a-b) + t*da - s*db = 0. Cross both sides
-    //   with db (which kills the s*db term because db x db = 0) and solve for t:
-    //       t = ((b - a) x db) / (da x db)
-    //   The denominator (da x db) is zero exactly when the lines are parallel.
+    // Line-line intersection a+t*da = b+s*db. Cross with db kills the s term:
+    //   t = ((b-a) x db) / (da x db). Denominator 0 => parallel (no fix).
     static bool Intersect(Vector2 a, Vector2 da, Vector2 b, Vector2 db, out Vector2 hit)
     {
         float denom = Cross(da, db);
-        if (Mathf.Abs(denom) < 1e-6f) { hit = default; return false; } // parallel
+        if (Mathf.Abs(denom) < 1e-6f) { hit = default; return false; }
         float t = Cross(b - a, db) / denom;
         hit = a + t * da;
         return true;
     }
 
-    // A measured bearing from a station to the true target, plus Gaussian noise.
-    float MeasuredBearing(int stationIdx, float unitGauss)
-        => Bearing(pts[2] - pts[stationIdx]) + unitGauss * noiseDeg;
+    float MeasuredBearing(int station, float g) => Bearing(pts[2] - pts[station]) + g * noiseDeg;
+    float MeasuredRange(int station, float g) =>
+        Mathf.Max(0.05f, Vector2.Distance(pts[station], pts[2]) + g * noiseUnit);
+
+    // TRILATERATION via linearisation.  Each circle: (x-xi)^2+(y-yi)^2 = ri^2.
+    // Subtracting circle 0 from circle k cancels the x^2 and y^2 terms (identical
+    // in every circle), leaving a STRAIGHT line ("radical line"):
+    //   2(xk-x0)x + 2(yk-y0)y = r0^2 - rk^2 + (xk^2+yk^2) - (x0^2+y0^2)
+    // Two such lines (k=1,2) give a 2x2 system; solve with Cramer's rule.
+    // WHY it's nice: squaring made it non-linear, subtracting made it linear again.
+    bool Trilaterate(int s0, int s1, int s2, out Vector2 fix)
+    {
+        Vector2 p0 = pts[s0], p1 = pts[s1], p2 = pts[s2];
+        float r0 = MeasuredRange(s0, gA), r1 = MeasuredRange(s1, gB), r2 = MeasuredRange(s2, gC);
+
+        // Row k:  ak . (x,y) = dk
+        float a1x = 2 * (p1.x - p0.x), a1y = 2 * (p1.y - p0.y);
+        float a2x = 2 * (p2.x - p0.x), a2y = 2 * (p2.y - p0.y);
+        float d1 = r0 * r0 - r1 * r1 + (p1.sqrMagnitude - p0.sqrMagnitude);
+        float d2 = r0 * r0 - r2 * r2 + (p2.sqrMagnitude - p0.sqrMagnitude);
+
+        float det = a1x * a2y - a1y * a2x; // stations collinear => det ~ 0
+        if (Mathf.Abs(det) < 1e-6f) { fix = default; return false; }
+        fix = new Vector2((d1 * a2y - d2 * a1y) / det,
+                          (a1x * d2 - a2x * d1) / det);
+        return true;
+    }
+
+    // Radical line for the pair (s0,sk): normal n = ak, offset d = dk. Returned as
+    // point+direction so we can draw it. (Used only by "show working".)
+    void RadicalLine(int s0, int sk, float rk, out Vector2 mid, out Vector2 dir)
+    {
+        Vector2 p0 = pts[s0], pk = pts[sk];
+        float r0 = MeasuredRange(s0, s0 == 0 ? gA : s0 == 1 ? gB : gC);
+        Vector2 n = new Vector2(2 * (pk.x - p0.x), 2 * (pk.y - p0.y));
+        float d = r0 * r0 - rk * rk + (pk.sqrMagnitude - p0.sqrMagnitude);
+        float len2 = Mathf.Max(1e-6f, n.sqrMagnitude);
+        mid = n * (d / len2);                 // closest point on the line to origin
+        dir = new Vector2(-n.y, n.x).normalized; // perpendicular to the normal
+    }
 
     // =====================================================================
-    //  INPUT  —  drag points around
+    //  INPUT — drag the active points
     // =====================================================================
-    Rect panelRect = new Rect(10, 10, 640, 540); // OnGUI panel, in top-left coords
+    Rect panelRect = new Rect(10, 10, 660, 560);
 
     void Update()
     {
         ppu = Mathf.Min(Screen.width, Screen.height) / mapSpan;
-        Vector2 mouse = (Vector2)Input.mousePosition; // bottom-left origin, +y up
-
-        // Ignore world-drags that start on top of the UI panel. panelRect is in
-        // GUI space (top-left origin), so flip mouse.y to compare.
+        Vector2 mouse = (Vector2)Input.mousePosition;
         bool overPanel = panelRect.Contains(new Vector2(mouse.x, Screen.height - mouse.y));
 
         if (Input.GetMouseButtonDown(0) && !overPanel)
         {
             dragIdx = -1;
-            float best = 22f; // pixel pick radius
-            for (int i = 0; i < pts.Length; i++)
+            float best = 24f;
+            // active = current method's stations + the true target (index 2)
+            foreach (int i in Active())
             {
                 float d = Vector2.Distance(mouse, MapToPix(pts[i]));
                 if (d < best) { best = d; dragIdx = i; }
@@ -143,8 +169,14 @@ public class TriangulationApp : MonoBehaviour
         if (Input.GetMouseButtonUp(0)) dragIdx = -1;
     }
 
+    System.Collections.Generic.IEnumerable<int> Active()
+    {
+        foreach (int s in Stations()) yield return s;
+        yield return 2; // target
+    }
+
     // =====================================================================
-    //  DRAWING  (GL immediate mode, in pixel space)
+    //  GL DRAWING
     // =====================================================================
     void EnsureMat()
     {
@@ -161,7 +193,7 @@ public class TriangulationApp : MonoBehaviour
     {
         Vector2 pa = MapToPix(aMap), pb = MapToPix(bMap);
         Vector2 dir = (pb - pa).sqrMagnitude > 1e-6f ? (pb - pa).normalized : Vector2.right;
-        Vector2 perp = new Vector2(-dir.y, dir.x); // 90° rotation, to fake thickness
+        Vector2 perp = new Vector2(-dir.y, dir.x);
         GL.Color(c);
         for (float o = -width * 0.5f; o <= width * 0.5f; o += 1f)
         {
@@ -171,12 +203,24 @@ public class TriangulationApp : MonoBehaviour
         }
     }
 
-    void Marker(Vector2 mMap, Color c, float half = 6f)
+    void Circle(Vector2 cMap, float rMap, Color col, int seg = 96)
+    {
+        GL.Color(col);
+        Vector2 prev = cMap + new Vector2(rMap, 0);
+        for (int i = 1; i <= seg; i++)
+        {
+            float a = i / (float)seg * 2f * Mathf.PI;
+            Vector2 cur = cMap + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * rMap;
+            Vector2 pp = MapToPix(prev), pc = MapToPix(cur);
+            GL.Vertex3(pp.x, pp.y, 0); GL.Vertex3(pc.x, pc.y, 0);
+            prev = cur;
+        }
+    }
+
+    void Marker(Vector2 mMap, Color c, float half = 7f)
     {
         Vector2 p = MapToPix(mMap);
         GL.Color(c);
-        // filled square via two triangles' worth of QUAD — drawn as line pairs is
-        // fiddly, so we just draw a small plus + box outline with LINES.
         GL.Vertex3(p.x - half, p.y, 0); GL.Vertex3(p.x + half, p.y, 0);
         GL.Vertex3(p.x, p.y - half, 0); GL.Vertex3(p.x, p.y + half, 0);
         GL.Vertex3(p.x - half, p.y - half, 0); GL.Vertex3(p.x + half, p.y - half, 0);
@@ -202,119 +246,161 @@ public class TriangulationApp : MonoBehaviour
         EnsureMat();
         GL.PushMatrix();
         glMat.SetPass(0);
-        GL.LoadPixelMatrix();      // 2D pixel coordinate system, bottom-left origin
-
+        GL.LoadPixelMatrix();
         GL.Begin(GL.LINES);
+
         Grid();
-
-        Vector2 A = pts[0], B = pts[1], T = pts[2];
-        Vector2 dA = Dir(MeasuredBearing(0, gA));
-        Vector2 dB = Dir(MeasuredBearing(1, gB));
-
-        Color colA = new Color(0.30f, 0.75f, 1.00f);   // A = blue
-        Color colB = new Color(1.00f, 0.55f, 0.25f);   // B = orange
-        Color colBase = new Color(1, 1, 1, 0.35f);     // baseline A-B
-        Color colTrue = new Color(0.35f, 1.00f, 0.45f);// true target = green
-        Color colEst = new Color(1.00f, 0.25f, 0.45f); // estimate  = red
-
-        // Baseline between the two known stations.
-        Line(A, B, colBase, 2f);
-
-        // Bearing lines: shoot each measured bearing far across the map.
-        Line(A, A + dA * 40f, colA, 2f);
-        Line(B, B + dB * 40f, colB, 2f);
-
-        // Markers.
-        Marker(A, colA, 7f);
-        Marker(B, colB, 7f);
-        Marker(T, colTrue, 7f);
-        if (Intersect(A, dA, B, dB, out Vector2 est)) Marker(est, colEst, 9f);
+        if (method == 1) DrawMethod1(); else DrawMethod2();
+        Marker(pts[2], cTrue, 7f); // true target on top in both methods
 
         GL.End();
         GL.PopMatrix();
     }
 
+    void DrawMethod1()
+    {
+        Vector2 A = pts[0], B = pts[1];
+        Vector2 dA = Dir(MeasuredBearing(0, gA));
+        Vector2 dB = Dir(MeasuredBearing(1, gB));
+
+        Line(A, B, cBase, 2f);
+        Line(A, A + dA * 40f, cA, 2f);
+        Line(B, B + dB * 40f, cB, 2f);
+        Marker(A, cA); Marker(B, cB);
+
+        if (Intersect(A, dA, B, dB, out Vector2 fix))
+        {
+            Marker(fix, cEst, 9f);
+            if (showWork) { Line(A, fix, new Color(1, 1, 1, 0.5f), 1f); Line(B, fix, new Color(1, 1, 1, 0.5f), 1f); }
+        }
+    }
+
+    void DrawMethod2()
+    {
+        int[] s = { 0, 1, 3 };
+        float[] r = { MeasuredRange(0, gA), MeasuredRange(1, gB), MeasuredRange(3, gC) };
+        Color[] col = { cA, cB, cC };
+        for (int i = 0; i < 3; i++) { Circle(pts[s[i]], r[i], col[i]); Marker(pts[s[i]], col[i]); }
+
+        if (showWork)
+        {
+            // radical lines from circle 0 vs circle 1, and circle 0 vs circle 2
+            RadicalLine(0, 1, r[1], out Vector2 m1, out Vector2 d1);
+            RadicalLine(0, 3, r[2], out Vector2 m2, out Vector2 d2);
+            Line(m1 - d1 * 30f, m1 + d1 * 30f, new Color(1, 1, 1, 0.45f), 1f);
+            Line(m2 - d2 * 30f, m2 + d2 * 30f, new Color(1, 1, 1, 0.45f), 1f);
+        }
+        if (Trilaterate(0, 1, 3, out Vector2 fix)) Marker(fix, cEst, 9f);
+    }
+
     // =====================================================================
-    //  READOUT PANEL + floating labels
+    //  UI  (readout panel + floating labels)
     // =====================================================================
     GUIStyle label;
 
     void Lbl(Vector2 mMap, string text, Color c)
     {
         Vector2 p = MapToPix(mMap);
-        // Box must be at least as tall as the font, or the glyphs get clipped.
         float h = label.fontSize + 12f;
-        // GL/pixel space is +y up, but OnGUI is +y down → flip y for placement.
         var r = new Rect(p.x + 10, Screen.height - p.y - h * 0.5f, 260, h);
-        var s = new GUIStyle(label); s.normal.textColor = c; s.alignment = TextAnchor.MiddleLeft;
-        GUI.Label(r, text, s);
+        var st = new GUIStyle(label); st.normal.textColor = c; st.alignment = TextAnchor.MiddleLeft;
+        GUI.Label(r, text, st);
     }
 
     void OnGUI()
     {
-        if (label == null)
-            label = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
+        if (label == null) label = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
 
-        Vector2 A = pts[0], B = pts[1], T = pts[2];
+        // floating labels
+        Lbl(pts[0], "A", cA);
+        Lbl(pts[1], "B", cB);
+        if (method == 2) Lbl(pts[3], "C", cC);
+        Lbl(pts[2], "true", cTrue);
 
-        // --- the measurements & the fix ---
-        float bA = MeasuredBearing(0, gA);
-        float bB = MeasuredBearing(1, gB);
-        Vector2 dA = Dir(bA), dB = Dir(bB);
-        bool ok = Intersect(A, dA, B, dB, out Vector2 est);
-
-        // Law of sines pieces (see panel text below for the meaning).
-        float c = Vector2.Distance(A, B);                 // baseline length
-        float angA = Vector2.Angle(B - A, dA);            // interior angle at A
-        float angB = Vector2.Angle(A - B, dB);            // interior angle at B
-        float angT = 180f - angA - angB;                  // remaining angle at target
-        float err = ok ? Vector2.Distance(est, T) : -1f;
-
-        // --- floating labels on the map ---
-        Lbl(A, "A", new Color(0.30f, 0.75f, 1f));
-        Lbl(B, "B", new Color(1f, 0.55f, 0.25f));
-        Lbl(T, "true", new Color(0.35f, 1f, 0.45f));
-        if (ok) Lbl(est, "fix", new Color(1f, 0.25f, 0.45f));
-
-        // --- readout panel ---
         GUI.Box(panelRect, "");
-        GUILayout.BeginArea(new Rect(panelRect.x + 10, panelRect.y + 8, panelRect.width - 20, panelRect.height - 16));
-        GUILayout.Label("<b>Method 1 — Triangulation (bearings)</b>", Rich());
-        GUILayout.Space(2);
+        GUILayout.BeginArea(new Rect(panelRect.x + 12, panelRect.y + 10, panelRect.width - 24, panelRect.height - 20));
+
+        // method switch
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Toggle(method == 1, "  Method 1: bearings", Btn(), GUILayout.Height(46)) && method != 1) method = 1;
+        if (GUILayout.Toggle(method == 2, "  Method 2: ranges", Btn(), GUILayout.Height(46)) && method != 2) method = 2;
+        GUILayout.EndHorizontal();
+        GUILayout.Space(6);
+
+        if (method == 1) Panel1(); else Panel2();
+
+        GUILayout.Space(8);
+        showWork = GUILayout.Toggle(showWork, "  Show working", Btn(), GUILayout.Height(40));
+        GUILayout.EndArea();
+    }
+
+    void Panel1()
+    {
+        Vector2 A = pts[0], B = pts[1], T = pts[2];
+        float bA = MeasuredBearing(0, gA), bB = MeasuredBearing(1, gB);
+        Vector2 dA = Dir(bA), dB = Dir(bB);
+        bool ok = Intersect(A, dA, B, dB, out Vector2 fix);
+        float c = Vector2.Distance(A, B);
+        float angA = Vector2.Angle(B - A, dA), angB = Vector2.Angle(A - B, dB);
+        float angT = 180f - angA - angB;
+        float err = ok ? Vector2.Distance(fix, T) : -1f;
+
+        GUILayout.Label("<b>Triangulation — two bearings cross</b>", Rich());
         GUILayout.Label($"Bearing A→target : {bA:0.0}°", label);
         GUILayout.Label($"Bearing B→target : {bB:0.0}°", label);
-        GUILayout.Label($"Baseline A–B     : {c:0.00} u", label);
+        GUILayout.Label($"Baseline A–B : {c:0.00} u", label);
         GUILayout.Label($"Angles  α={angA:0.0}°  β={angB:0.0}°  γ={angT:0.0}°", label);
+        Fix(ok, fix, err);
+        NoiseRow(ref noiseDeg, 0f, 15f, "Bearing noise", "°");
+    }
+
+    void Panel2()
+    {
+        Vector2 T = pts[2];
+        float rA = MeasuredRange(0, gA), rB = MeasuredRange(1, gB), rC = MeasuredRange(3, gC);
+        bool ok = Trilaterate(0, 1, 3, out Vector2 fix);
+        float err = ok ? Vector2.Distance(fix, T) : -1f;
+
+        GUILayout.Label("<b>Trilateration — three range circles (GPS)</b>", Rich());
+        GUILayout.Label($"Range A : {rA:0.00} u", label);
+        GUILayout.Label($"Range B : {rB:0.00} u", label);
+        GUILayout.Label($"Range C : {rC:0.00} u", label);
+        Fix(ok, fix, err);
+        NoiseRow(ref noiseUnit, 0f, 3f, "Range noise", " u");
+    }
+
+    void Fix(bool ok, Vector2 fix, float err)
+    {
         if (ok)
         {
-            GUILayout.Label($"Fix (x,y) : ({est.x:0.00}, {est.y:0.00})", label);
+            GUILayout.Label($"Fix (x,y) : ({fix.x:0.00}, {fix.y:0.00})", label);
             GUILayout.Label($"Error vs true : {err:0.000} u", Colored(err));
         }
-        else GUILayout.Label("Bearings parallel — no fix", Colored(99));
+        else GUILayout.Label("Degenerate geometry — no fix", Colored(-1));
+    }
 
+    void NoiseRow(ref float noise, float lo, float hi, string name, string unit)
+    {
         GUILayout.Space(6);
-        GUILayout.Label($"Bearing noise: {noiseDeg:0.0}°", label);
-        noiseDeg = GUILayout.HorizontalSlider(noiseDeg, 0f, 15f, GUILayout.Height(30));
+        GUILayout.Label($"{name}: {noise:0.0}{unit}", label);
+        noise = GUILayout.HorizontalSlider(noise, lo, hi, GUILayout.Height(30));
         GUILayout.Space(6);
         if (GUILayout.Button("New noise sample", Btn(), GUILayout.Height(50)))
         {
-            // fresh unit-normal samples via Box–Muller (two uniforms -> two normals)
-            float u1 = Mathf.Max(1e-6f, Random.value), u2 = Random.value;
-            float mag = Mathf.Sqrt(-2f * Mathf.Log(u1));
-            gA = mag * Mathf.Cos(2f * Mathf.PI * u2);
-            gB = mag * Mathf.Sin(2f * Mathf.PI * u2);
-            clicks++;
-            Log($"CLICK #{clicks}  noise={noiseDeg:0.00}  gA={gA:0.000}  gB={gB:0.000}");
+            gA = Gauss(); gB = Gauss(); gC = Gauss();
         }
+    }
 
-        // TEMP DIAGNOSTIC readout — remove once we've proven the cause.
-        GUILayout.Label($"[dbg] clicks={clicks}  gA={gA:0.00}  gB={gB:0.00}  noise={noiseDeg:0.0}", label);
-        GUILayout.EndArea();
+    // Standard normal sample via Box–Muller (one uniform pair -> one normal).
+    static float Gauss()
+    {
+        float u1 = Mathf.Max(1e-6f, Random.value), u2 = Random.value;
+        return Mathf.Sqrt(-2f * Mathf.Log(u1)) * Mathf.Cos(2f * Mathf.PI * u2);
     }
 
     GUIStyle _rich, _col, _btn;
     GUIStyle Rich() { if (_rich == null) _rich = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 26 }; return _rich; }
-    GUIStyle Btn() { if (_btn == null) _btn = new GUIStyle(GUI.skin.button) { fontSize = 26 }; return _btn; }
+    GUIStyle Btn() { if (_btn == null) _btn = new GUIStyle(GUI.skin.button) { fontSize = 22 }; return _btn; }
     GUIStyle Colored(float err)
     {
         if (_col == null) _col = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
