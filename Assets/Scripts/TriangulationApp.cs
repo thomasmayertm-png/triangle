@@ -71,6 +71,7 @@ public class TriangulationApp : MonoBehaviour
     int dragIdx = -1;
     const float mapSpan = 26f;
     float ppu;
+    Vector2 mapCenter;                   // pixel centre of the map's viewport (avoids the panel)
 
     Material glMat;
 
@@ -88,10 +89,27 @@ public class TriangulationApp : MonoBehaviour
     // =====================================================================
     //  COORDINATE TRANSFORM  (map units <-> screen pixels, +y up like GL)
     // =====================================================================
-    Vector2 MapToPix(Vector2 m) => new Vector2(Screen.width * 0.5f + m.x * ppu,
-                                               Screen.height * 0.5f + m.y * ppu);
-    Vector2 PixToMap(Vector2 p) => new Vector2((p.x - Screen.width * 0.5f) / ppu,
-                                               (p.y - Screen.height * 0.5f) / ppu);
+    Vector2 MapToPix(Vector2 m) => new Vector2(mapCenter.x + m.x * ppu, mapCenter.y + m.y * ppu);
+    Vector2 PixToMap(Vector2 p) => new Vector2((p.x - mapCenter.x) / ppu, (p.y - mapCenter.y) / ppu);
+
+    // Fit the map into the largest screen region NOT covered by the panel, so the
+    // graph and the UI never overlap. Panel is top-left; the free area is either to
+    // its right (landscape) or below it (portrait) — pick whichever is bigger.
+    // Pixel space here is bottom-left origin (+y up), matching GL and the mouse.
+    void ComputeViewport()
+    {
+        float margin = 8f * ui;
+        float pRight = panelRect.xMax;                       // panel's right edge (px)
+        float pBottomPix = Screen.height - panelRect.yMax;   // panel's bottom edge in +y-up px
+        Rect right = new Rect(pRight + margin, 0, Screen.width - pRight - margin, Screen.height);
+        Rect below = new Rect(0, 0, Screen.width, pBottomPix - margin);
+        Rect v = (right.width * right.height >= below.width * below.height && right.width > 60f)
+                 ? right : below;
+        v.width = Mathf.Max(60f, v.width);
+        v.height = Mathf.Max(60f, v.height);
+        ppu = Mathf.Min(v.width, v.height) / mapSpan;
+        mapCenter = v.center;
+    }
 
     // =====================================================================
     //  MATHS HELPERS
@@ -174,8 +192,10 @@ public class TriangulationApp : MonoBehaviour
 
     void Update()
     {
-        ppu = Mathf.Min(Screen.width, Screen.height) / mapSpan;
-        if (!uiInit) { ui = Mathf.Clamp(Screen.height / 1080f, 1f, 2.5f); uiInit = true; }
+        // Initial UI scale: big enough to read, but keep the 660-wide panel within the
+        // screen width (matters on narrow phones in portrait). A-/A+ tune it after.
+        if (!uiInit) { ui = Mathf.Clamp(Mathf.Min(Screen.height / 1080f, Screen.width / 720f), 0.8f, 2.5f); uiInit = true; }
+        ComputeViewport();
 
         if (method == 6)                       // moving-target Kalman demo: no dragging
         {
