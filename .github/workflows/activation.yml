@@ -1,0 +1,22 @@
+# RUN THIS ONCE to get a Unity license file for CI, then you can delete it.
+# Actions tab ▸ "Acquire Unity activation file" ▸ Run workflow. Download the
+# artifact (.alf), then follow RUN_ON_IPHONE.md to turn it into the UNITY_LICENSE secret.
+name: Acquire Unity activation file (run once)
+
+on: workflow_dispatch
+
+jobs:
+  activation:
+    name: Request .alf
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request manual activation file
+        id: getManualLicenseFile
+        uses: game-ci/request-activation-file@v2
+
+      - name: Upload activation file
+        uses: actions/upload-artifact@v4
+        with:
+          name: Manual Activation File
+          path: ${{ steps.getManualLicenseFile.outputs.filePath }}
+          retention-days: 1
