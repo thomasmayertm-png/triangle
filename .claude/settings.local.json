@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Program Files/Unity/Hub/Editor/**)",
+      "Read(//c/Program Files/Unity/**)",
+      "Read(//c/ProgramData/Unity/config/**)",
+      "Read(//c/Users/Thomas_Admin/AppData/Roaming/UnityHub/**)"
+    ]
+  }
+}
