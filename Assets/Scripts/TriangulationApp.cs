@@ -165,11 +165,17 @@ public class TriangulationApp : MonoBehaviour
     // =====================================================================
     //  INPUT — drag the active points
     // =====================================================================
-    Rect panelRect = new Rect(10, 10, 660, 730);
+    // Global UI scale so the panel + controls fit phone screens. A-/A+ buttons tune it.
+    float ui = 1f;
+    bool uiInit = false;
+    Rect panelRect => new Rect(10 * ui, 10 * ui, 660 * ui, 730 * ui);
+    int R(float v) => Mathf.RoundToInt(v * ui);                 // scaled font size
+    GUILayoutOption H(float v) => GUILayout.Height(v * ui);     // scaled control height
 
     void Update()
     {
         ppu = Mathf.Min(Screen.width, Screen.height) / mapSpan;
+        if (!uiInit) { ui = Mathf.Clamp(Screen.height / 1080f, 1f, 2.5f); uiInit = true; }
 
         if (method == 6)                       // moving-target Kalman demo: no dragging
         {
@@ -185,7 +191,7 @@ public class TriangulationApp : MonoBehaviour
         if (Input.GetMouseButtonDown(0) && !overPanel)
         {
             dragIdx = -1;
-            float best = 24f;
+            float best = 28f * ui;             // finger-sized pick radius on touch screens
             // active = current method's stations + the true target (index 2)
             foreach (int i in Active())
             {
@@ -713,7 +719,8 @@ public class TriangulationApp : MonoBehaviour
 
     void OnGUI()
     {
-        if (label == null) label = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
+        if (label == null) label = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold };
+        SizeStyles();               // rescale every frame so A-/A+ take effect live
 
         // floating labels
         if (method == 6)
@@ -729,20 +736,20 @@ public class TriangulationApp : MonoBehaviour
         }
 
         GUI.Box(panelRect, "");
-        GUILayout.BeginArea(new Rect(panelRect.x + 12, panelRect.y + 10, panelRect.width - 24, panelRect.height - 20));
+        GUILayout.BeginArea(new Rect(panelRect.x + 12 * ui, panelRect.y + 10 * ui, panelRect.width - 24 * ui, panelRect.height - 20 * ui));
 
         // method switch
         GUILayout.BeginHorizontal();
-        if (GUILayout.Toggle(method == 1, "M1 bearings", Btn(), GUILayout.Height(46)) && method != 1) method = 1;
-        if (GUILayout.Toggle(method == 2, "M2 ranges", Btn(), GUILayout.Height(46)) && method != 2) method = 2;
+        if (GUILayout.Toggle(method == 1, "M1 bearings", Btn(), H(46)) && method != 1) method = 1;
+        if (GUILayout.Toggle(method == 2, "M2 ranges", Btn(), H(46)) && method != 2) method = 2;
         GUILayout.EndHorizontal();
         GUILayout.BeginHorizontal();
-        if (GUILayout.Toggle(method == 3, "M3 TDOA", Btn(), GUILayout.Height(46)) && method != 3) method = 3;
-        if (GUILayout.Toggle(method == 4, "M4 best-fit", Btn(), GUILayout.Height(46)) && method != 4) method = 4;
+        if (GUILayout.Toggle(method == 3, "M3 TDOA", Btn(), H(46)) && method != 3) method = 3;
+        if (GUILayout.Toggle(method == 4, "M4 best-fit", Btn(), H(46)) && method != 4) method = 4;
         GUILayout.EndHorizontal();
         GUILayout.BeginHorizontal();
-        if (GUILayout.Toggle(method == 5, "M5 elliptic", Btn(), GUILayout.Height(46)) && method != 5) method = 5;
-        if (GUILayout.Toggle(method == 6, "M6 Kalman", Btn(), GUILayout.Height(46)) && method != 6) method = 6;
+        if (GUILayout.Toggle(method == 5, "M5 elliptic", Btn(), H(46)) && method != 5) method = 5;
+        if (GUILayout.Toggle(method == 6, "M6 Kalman", Btn(), H(46)) && method != 6) method = 6;
         GUILayout.EndHorizontal();
         GUILayout.Space(6);
 
@@ -755,20 +762,57 @@ public class TriangulationApp : MonoBehaviour
 
         GUILayout.Space(8);
         GUILayout.BeginHorizontal();
-        showWork = GUILayout.Toggle(showWork, "Show working", Btn(), GUILayout.Height(40));
-        showExplain = GUILayout.Toggle(showExplain, "Explain", Btn(), GUILayout.Height(40));
+        showWork = GUILayout.Toggle(showWork, "Show working", Btn(), H(40));
+        showExplain = GUILayout.Toggle(showExplain, "Explain", Btn(), H(40));
         GUILayout.EndHorizontal();
         GUILayout.EndArea();
 
         if (showExplain) DrawExplain();
+        DrawMobileControls();
     }
 
-    // Second panel, to the right of the main one: what the current method does, in words.
+    // Rescale the cached styles from the current ui factor (called each OnGUI).
+    void SizeStyles()
+    {
+        label.fontSize = R(26);
+        Rich().fontSize = R(26);
+        Btn().fontSize = R(22);
+        Wrap().fontSize = R(22);
+    }
+
+    // Always-tappable A-/A+ (fixed size, so reachable even if ui starts tiny) plus a
+    // portrait "rotate" hint. Drawn in the bottom-right where nothing else lives.
+    void DrawMobileControls()
+    {
+        float bs = Mathf.Max(46f, Screen.height * 0.07f), pad = bs * 0.3f;
+        var bstyle = new GUIStyle(GUI.skin.button) { fontSize = Mathf.RoundToInt(bs * 0.45f), fontStyle = FontStyle.Bold };
+        var rMinus = new Rect(Screen.width - bs * 2 - pad * 1.6f, Screen.height - bs - pad, bs, bs);
+        var rPlus = new Rect(Screen.width - bs - pad, Screen.height - bs - pad, bs, bs);
+        if (GUI.Button(rMinus, "A-", bstyle)) ui = Mathf.Clamp(ui - 0.15f, 0.6f, 3f);
+        if (GUI.Button(rPlus, "A+", bstyle)) ui = Mathf.Clamp(ui + 0.15f, 0.6f, 3f);
+
+        if (Screen.height > Screen.width)      // portrait: nudge the user to rotate
+        {
+            var hint = new GUIStyle(GUI.skin.label)
+            { fontSize = Mathf.RoundToInt(Screen.height * 0.02f), alignment = TextAnchor.UpperCenter };
+            hint.normal.textColor = new Color(1f, 1f, 1f, 0.7f);
+            GUI.Label(new Rect(0, 4, Screen.width, Screen.height * 0.05f),
+                      "↻ rotate to landscape for more room", hint);
+        }
+    }
+
+    // Explanation panel: to the right of the main one, or stacked below if there is
+    // not enough width (phones in portrait). Height clamped to the screen.
     void DrawExplain()
     {
-        var box = new Rect(panelRect.xMax + 12, panelRect.y, 640, 660);
+        float w = 640 * ui, h = 660 * ui;
+        float x = panelRect.xMax + 12 * ui, y = panelRect.y;
+        if (x + w > Screen.width) { x = panelRect.x; y = panelRect.yMax + 12 * ui; } // stack below
+        w = Mathf.Min(w, Screen.width - x - 12 * ui);
+        h = Mathf.Min(h, Screen.height - y - 12 * ui);
+        var box = new Rect(x, y, w, h);
         GUI.Box(box, "");
-        var area = new Rect(box.x + 14, box.y + 12, box.width - 28, box.height - 24);
+        var area = new Rect(box.x + 14 * ui, box.y + 12 * ui, box.width - 28 * ui, box.height - 24 * ui);
         GUILayout.BeginArea(area);
         GUILayout.Label(ExplainText(), Wrap());
         GUILayout.EndArea();
@@ -971,11 +1015,11 @@ public class TriangulationApp : MonoBehaviour
 
         GUILayout.Space(6);
         GUILayout.Label($"Measurement noise: {kfMeasNoise:0.0} u", label);
-        kfMeasNoise = GUILayout.HorizontalSlider(kfMeasNoise, 0f, 3f, GUILayout.Height(30));
+        kfMeasNoise = GUILayout.HorizontalSlider(kfMeasNoise, 0f, 3f, H(30));
         GUILayout.Label($"Process noise: {kfProcNoise:0.0}", label);
-        kfProcNoise = GUILayout.HorizontalSlider(kfProcNoise, 0.1f, 10f, GUILayout.Height(30));
+        kfProcNoise = GUILayout.HorizontalSlider(kfProcNoise, 0.1f, 10f, H(30));
         GUILayout.Space(6);
-        if (GUILayout.Button("Restart", Btn(), GUILayout.Height(50))) kfReady = false;
+        if (GUILayout.Button("Restart", Btn(), H(50))) kfReady = false;
     }
 
     void Fix(bool ok, Vector2 fix, float err)
@@ -1001,9 +1045,9 @@ public class TriangulationApp : MonoBehaviour
     {
         GUILayout.Space(6);
         GUILayout.Label($"{name}: {noise:0.0}{unit}", label);
-        noise = GUILayout.HorizontalSlider(noise, lo, hi, GUILayout.Height(30));
+        noise = GUILayout.HorizontalSlider(noise, lo, hi, H(30));
         GUILayout.Space(6);
-        if (GUILayout.Button("New noise sample", Btn(), GUILayout.Height(50)))
+        if (GUILayout.Button("New noise sample", Btn(), H(50)))
         {
             gA = Gauss(); gB = Gauss(); gC = Gauss();
         }
@@ -1021,7 +1065,8 @@ public class TriangulationApp : MonoBehaviour
     GUIStyle Btn() { if (_btn == null) _btn = new GUIStyle(GUI.skin.button) { fontSize = 22 }; return _btn; }
     GUIStyle Colored(float err)
     {
-        if (_col == null) _col = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
+        if (_col == null) _col = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold };
+        _col.fontSize = R(26);
         _col.normal.textColor = err < 0 ? Color.gray : Color.Lerp(Color.green, Color.red, Mathf.Clamp01(err / 3f));
         return _col;
     }

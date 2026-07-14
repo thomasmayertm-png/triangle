@@ -18,3 +18,7 @@
 
 # temp diagnostics
 debug_noise.log
+
+# WebGL build output (large, regenerated) and zips
+WebGLBuild/
+*.zip
