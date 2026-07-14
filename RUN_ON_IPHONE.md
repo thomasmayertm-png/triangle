@@ -78,15 +78,15 @@ in Unity again.
    git remote add origin https://github.com/<you>/triangle.git
    git push -u origin master
    ```
-2. **Get a free Unity CI licence:**
-   - GitHub → **Actions** tab → **"Acquire Unity activation file"** → **Run workflow**.
-   - When it finishes, open the run → **download the artifact** (a `Unity_v6000.x.alf`).
-   - Go to <https://license.unity3d.com/manual>, upload that `.alf`, and download the
-     `.ulf` licence file it gives back (pick **Unity Personal**).
-   - Repo → **Settings ▸ Secrets and variables ▸ Actions ▸ New repository secret**:
-     name **`UNITY_LICENSE`**, value = the **entire contents** of the `.ulf` file.
+2. **Get a free Unity CI licence** (current game-ci method — activate locally, no
+   cloud activation action; that action is deprecated):
+   - **Unity Hub → (gear) Preferences → Licenses** → **Add → Get a free personal
+     license**. This writes `C:\ProgramData\Unity\Unity_lic.ulf`.
+   - Repo → **Settings ▸ Secrets and variables ▸ Actions** → add **three** secrets:
+     - **`UNITY_LICENSE`** = the entire contents of `Unity_lic.ulf`
+     - **`UNITY_EMAIL`** = your Unity account email
+     - **`UNITY_PASSWORD`** = your Unity account password
 3. **Turn on Pages via Actions:** repo → **Settings ▸ Pages ▸ Source = "GitHub Actions"**.
-4. (Optional) delete `.github/workflows/activation.yml` — it's only needed once.
 
 **From then on:** every `git push` runs **"Build WebGL & Deploy to Pages"**. Watch it in
 the **Actions** tab; when green, your app is live at
