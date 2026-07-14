@@ -19,6 +19,5 @@
 # temp diagnostics
 debug_noise.log
 
-# WebGL build output (large, regenerated) and zips
-WebGLBuild/
+# Zips (build folder WebGLBuild/ is committed on purpose so CI can deploy it)
 *.zip

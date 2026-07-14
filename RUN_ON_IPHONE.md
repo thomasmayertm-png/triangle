@@ -67,35 +67,28 @@ Phone and PC must be on the **same Wi-Fi**.
 
 ---
 
-### Option B3 — Auto-build with GitHub Actions (hands-off, recommended)
-Two workflows are already in `.github/workflows/`. After a one-time setup, **every
-push rebuilds WebGL in the cloud and republishes your Pages URL** — you never build
-in Unity again.
+### Option B3 — GitHub Actions publishes your local build (no Unity licence in CI)
+The workflow `.github/workflows/webgl.yml` does **not** build Unity (Unity 6 makes CI
+licensing painful). Instead you **build WebGL locally**, commit the `WebGLBuild/`
+folder, push, and the workflow deploys it to your Pages URL.
 
 **One-time setup:**
-1. **Create the repo & push** (branch is `master`):
-   ```
-   git remote add origin https://github.com/<you>/triangle.git
-   git push -u origin master
-   ```
-2. **Get a free Unity CI licence** (current game-ci method — activate locally, no
-   cloud activation action; that action is deprecated):
-   - **Unity Hub → (gear) Preferences → Licenses** → **Add → Get a free personal
-     license**. This writes `C:\ProgramData\Unity\Unity_lic.ulf`.
-   - Repo → **Settings ▸ Secrets and variables ▸ Actions** → add **three** secrets:
-     - **`UNITY_LICENSE`** = the entire contents of `Unity_lic.ulf`
-     - **`UNITY_EMAIL`** = your Unity account email
-     - **`UNITY_PASSWORD`** = your Unity account password
-3. **Turn on Pages via Actions:** repo → **Settings ▸ Pages ▸ Source = "GitHub Actions"**.
+1. **Turn on Pages via Actions:** repo → **Settings ▸ Pages ▸ Source = "GitHub Actions"**.
 
-**From then on:** every `git push` runs **"Build WebGL & Deploy to Pages"**. Watch it in
-the **Actions** tab; when green, your app is live at
-`https://<you>.github.io/triangle/` — open it in iPhone Safari.
+**Each time you want to update the live site:**
+1. In Unity, build WebGL into the **`WebGLBuild/`** folder at the repo root (Step 0 above).
+2. Commit and push it:
+   ```
+   git add WebGLBuild
+   git commit -m "web build"
+   git push
+   ```
+3. The **"Deploy WebGL to Pages"** workflow runs (~1 min). When green, your app is live
+   at `https://<you>.github.io/triangle/` — open it in iPhone Safari.
 
-> Notes: the build reads your Unity version from `ProjectSettings/ProjectVersion.txt`
-> automatically. The first cloud build is slow (~10-15 min, no cache yet); later ones
-> are faster thanks to the Library cache. Unity WebGL uses relative paths, so it works
-> fine under the `/<repo>/` sub-path Pages serves from.
+> Notes: the `WebGLBuild/` folder is committed to the repo on purpose (that's what CI
+> publishes). It's a few MB; if it grows annoying over time we can switch it to Git LFS.
+> Unity WebGL uses relative paths, so it works under the `/triangle/` sub-path Pages uses.
 
 ## Mobile UI notes
 - **A− / A+** buttons (bottom-right) scale the whole panel/fonts — tap **A+** on the

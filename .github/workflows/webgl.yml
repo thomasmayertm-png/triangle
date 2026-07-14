@@ -1,82 +1,55 @@
-# Builds the Unity WebGL player in the cloud and publishes it to GitHub Pages.
-# On every push (or manual run) you get an updated https://<user>.github.io/<repo>/ .
+# Publishes a locally-made Unity WebGL build to GitHub Pages.
+# No Unity licence needed in CI: you build WebGL in Unity into the WebGLBuild/
+# folder, commit it, and push. This workflow just deploys those files.
 #
-# ONE-TIME SETUP (see RUN_ON_IPHONE.md ▸ "Auto-build with GitHub Actions"):
-#   1. Add a repo secret UNITY_LICENSE with your Unity personal .ulf contents.
-#   2. Repo Settings ▸ Pages ▸ Source = "GitHub Actions".
-name: Build WebGL & Deploy to Pages
+# ONE-TIME: repo Settings ▸ Pages ▸ Source = "GitHub Actions".
+name: Deploy WebGL to Pages
 
 on:
   push:
     branches: [ master, main ]
-  workflow_dispatch:          # lets you run it by hand from the Actions tab
+    paths:
+      - "WebGLBuild/**"
+      - ".github/workflows/webgl.yml"
+  workflow_dispatch:
 
-# Permissions the official Pages deploy needs.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Don't let two Pages deploys race; keep the newest.
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build WebGL
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      # Cache the imported Library so subsequent builds are much faster.
-      - name: Cache Library
-        uses: actions/cache@v4
-        with:
-          path: Library
-          key: Library-WebGL-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-WebGL-
-            Library-
-
-      # game-ci reads the Unity version from ProjectSettings/ProjectVersion.txt
-      # and pulls the matching editor image automatically.
-      - name: Build
-        uses: game-ci/unity-builder@v4
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          targetPlatform: WebGL
-
-      # Find the folder that actually contains index.html (game-ci nests it),
-      # and stage it as the site root so we don't hard-code the path.
-      - name: Stage site
-        run: |
-          set -e
-          ROOT="$(dirname "$(find build -name index.html | head -n1)")"
-          echo "Web root: $ROOT"
-          mkdir -p public
-          cp -r "$ROOT"/. public/
-          touch public/.nojekyll        # serve Unity's Build/ folder untouched
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
-
   deploy:
     name: Deploy to Pages
-    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check the build exists
+        run: |
+          if [ ! -f WebGLBuild/index.html ]; then
+            echo "::error::WebGLBuild/index.html not found. Build WebGL in Unity into a"
+            echo "::error::folder named WebGLBuild at the repo root, commit it, and push."
+            exit 1
+          fi
+          touch WebGLBuild/.nojekyll   # serve Unity's Build/ folder verbatim
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: WebGLBuild
+
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
