@@ -47,6 +47,7 @@ public class TriangulationApp : MonoBehaviour
 
     float noiseDeg = 0f;                 // Method-1 bearing noise, std-dev degrees
     float noiseUnit = 0f;                // Method-2 range   noise, std-dev units
+    float noiseTdoa = 0f;                // Method-3 range-difference noise, std-dev units
     float gA = 0.6f, gB = -0.9f, gC = 0.4f; // fixed unit-normal samples per station
 
     int dragIdx = -1;
@@ -250,8 +251,10 @@ public class TriangulationApp : MonoBehaviour
         GL.Begin(GL.LINES);
 
         Grid();
-        if (method == 1) DrawMethod1(); else DrawMethod2();
-        Marker(pts[2], cTrue, 7f); // true target on top in both methods
+        if (method == 1) DrawMethod1();
+        else if (method == 2) DrawMethod2();
+        else DrawMethod3();
+        Marker(pts[2], cTrue, 7f); // true target on top in every method
 
         GL.End();
         GL.PopMatrix();
@@ -293,6 +296,100 @@ public class TriangulationApp : MonoBehaviour
         if (Trilaterate(0, 1, 3, out Vector2 fix)) Marker(fix, cEst, 9f);
     }
 
+    void DrawMethod3()
+    {
+        Vector2 A = pts[0], B = pts[1], C = pts[3];
+        Marker(A, cA); Marker(B, cB); Marker(C, cC);
+
+        float dAB = MeasuredDiff(0, 1, gA);   // range difference dA - dB
+        float dAC = MeasuredDiff(0, 3, gB);   // range difference dA - dC
+
+        // Each range difference draws one hyperbola with the pair as its foci.
+        Hyperbola(A, B, dAB, cB, showWork);   // coloured by the "other" focus
+        Hyperbola(A, C, dAC, cC, showWork);
+
+        if (SolveTDOA(out Vector2 fix)) Marker(fix, cEst, 9f);
+    }
+
+    // Measured range DIFFERENCE dA - dB, with Gaussian noise (the TDOA observable).
+    float MeasuredDiff(int sA, int sB, float g)
+        => (Vector2.Distance(pts[2], pts[sA]) - Vector2.Distance(pts[2], pts[sB])) + g * noiseTdoa;
+
+    // Draw the branch of the hyperbola { p : dist(p,F1) - dist(p,F2) = delta }.
+    //   Center M = midpoint of foci; half-focal-separation c = |F1F2|/2.
+    //   Semi-axis a = delta/2 (sign selects which branch, i.e. which focus is nearer).
+    //   b = sqrt(c^2 - a^2). Points parametrise as (a*cosh t, b*sinh t) in the
+    //   frame u = F1->F2, uP = perpendicular. |a| < c always (triangle inequality),
+    //   so b is real.
+    void Hyperbola(Vector2 F1, Vector2 F2, float delta, Color col, bool asymptotes)
+    {
+        Vector2 axis = F2 - F1;
+        float focal = axis.magnitude;
+        if (focal < 1e-4f) return;
+        Vector2 u = axis / focal, uP = new Vector2(-u.y, u.x);
+        Vector2 M = (F1 + F2) * 0.5f;
+        float c = focal * 0.5f;
+        float a = Mathf.Clamp(delta * 0.5f, -c * 0.999f, c * 0.999f);
+        float b = Mathf.Sqrt(Mathf.Max(0f, c * c - a * a));
+
+        const int seg = 90; const float tmax = 2.3f;
+        Vector2 prev = default; bool has = false;
+        for (int i = 0; i <= seg; i++)
+        {
+            float t = -tmax + 2f * tmax * i / seg;
+            float lx = a * (float)System.Math.Cosh(t);
+            float ly = b * (float)System.Math.Sinh(t);
+            Vector2 w = M + u * lx + uP * ly;
+            if (has) Line(prev, w, col, 2f);
+            prev = w; has = true;
+        }
+
+        if (asymptotes)
+        {
+            // Hyperbola hugs two straight lines through M with local slope ±b/a.
+            Vector2 d1 = (u * Mathf.Abs(a) + uP * b).normalized;
+            Vector2 d2 = (u * Mathf.Abs(a) - uP * b).normalized;
+            Color faint = new Color(1, 1, 1, 0.30f);
+            Line(M - d1 * 30f, M + d1 * 30f, faint, 1f);
+            Line(M - d2 * 30f, M + d2 * 30f, faint, 1f);
+        }
+    }
+
+    // TDOA fix by Gauss-Newton. Residuals are the two range-difference equations:
+    //   r1(p) = (|p-A| - |p-B|) - dAB ,  r2(p) = (|p-A| - |p-C|) - dAC.
+    // The gradient of |p-A| is the unit vector A->p, so each residual's gradient is
+    //   grad r = unit(p-A) - unit(p-Si).  We stack these into J and step
+    //   p <- p - (JtJ)^-1 Jt r  until it stops moving. Start at the station centroid.
+    bool SolveTDOA(out Vector2 fix)
+    {
+        Vector2 A = pts[0], B = pts[1], C = pts[3];
+        float dAB = MeasuredDiff(0, 1, gA), dAC = MeasuredDiff(0, 3, gB);
+        Vector2 p = (A + B + C) / 3f;
+
+        for (int it = 0; it < 60; it++)
+        {
+            Vector2 uA = (p - A).normalized, uB = (p - B).normalized, uC = (p - C).normalized;
+            float r1 = (Vector2.Distance(p, A) - Vector2.Distance(p, B)) - dAB;
+            float r2 = (Vector2.Distance(p, A) - Vector2.Distance(p, C)) - dAC;
+            Vector2 j1 = uA - uB, j2 = uA - uC;      // residual gradients (rows of J)
+
+            // 2x2 normal equations  (JtJ) dp = -(Jt r)
+            float m00 = j1.x * j1.x + j2.x * j2.x;
+            float m01 = j1.x * j1.y + j2.x * j2.y;
+            float m11 = j1.y * j1.y + j2.y * j2.y;
+            float g0 = j1.x * r1 + j2.x * r2;
+            float g1 = j1.y * r1 + j2.y * r2;
+            float det = m00 * m11 - m01 * m01;
+            if (Mathf.Abs(det) < 1e-9f) break;       // degenerate geometry
+            float dx = -(m11 * g0 - m01 * g1) / det;
+            float dy = -(m00 * g1 - m01 * g0) / det;
+            p += new Vector2(dx, dy);
+            if (dx * dx + dy * dy < 1e-10f) break;   // converged
+        }
+        fix = p;
+        return !(float.IsNaN(p.x) || float.IsNaN(p.y));
+    }
+
     // =====================================================================
     //  UI  (readout panel + floating labels)
     // =====================================================================
@@ -314,7 +411,7 @@ public class TriangulationApp : MonoBehaviour
         // floating labels
         Lbl(pts[0], "A", cA);
         Lbl(pts[1], "B", cB);
-        if (method == 2) Lbl(pts[3], "C", cC);
+        if (method != 1) Lbl(pts[3], "C", cC);
         Lbl(pts[2], "true", cTrue);
 
         GUI.Box(panelRect, "");
@@ -322,12 +419,13 @@ public class TriangulationApp : MonoBehaviour
 
         // method switch
         GUILayout.BeginHorizontal();
-        if (GUILayout.Toggle(method == 1, "  Method 1: bearings", Btn(), GUILayout.Height(46)) && method != 1) method = 1;
-        if (GUILayout.Toggle(method == 2, "  Method 2: ranges", Btn(), GUILayout.Height(46)) && method != 2) method = 2;
+        if (GUILayout.Toggle(method == 1, "M1 bearings", Btn(), GUILayout.Height(46)) && method != 1) method = 1;
+        if (GUILayout.Toggle(method == 2, "M2 ranges", Btn(), GUILayout.Height(46)) && method != 2) method = 2;
+        if (GUILayout.Toggle(method == 3, "M3 TDOA", Btn(), GUILayout.Height(46)) && method != 3) method = 3;
         GUILayout.EndHorizontal();
         GUILayout.Space(6);
 
-        if (method == 1) Panel1(); else Panel2();
+        if (method == 1) Panel1(); else if (method == 2) Panel2(); else Panel3();
 
         GUILayout.Space(8);
         showWork = GUILayout.Toggle(showWork, "  Show working", Btn(), GUILayout.Height(40));
@@ -367,6 +465,20 @@ public class TriangulationApp : MonoBehaviour
         GUILayout.Label($"Range C : {rC:0.00} u", label);
         Fix(ok, fix, err);
         NoiseRow(ref noiseUnit, 0f, 3f, "Range noise", " u");
+    }
+
+    void Panel3()
+    {
+        Vector2 T = pts[2];
+        float dAB = MeasuredDiff(0, 1, gA), dAC = MeasuredDiff(0, 3, gB);
+        bool ok = SolveTDOA(out Vector2 fix);
+        float err = ok ? Vector2.Distance(fix, T) : -1f;
+
+        GUILayout.Label("<b>Multilateration — TDOA hyperbolas</b>", Rich());
+        GUILayout.Label($"Range diff dA-dB : {dAB:0.00} u", label);
+        GUILayout.Label($"Range diff dA-dC : {dAC:0.00} u", label);
+        Fix(ok, fix, err);
+        NoiseRow(ref noiseTdoa, 0f, 2f, "TDOA noise", " u");
     }
 
     void Fix(bool ok, Vector2 fix, float err)
