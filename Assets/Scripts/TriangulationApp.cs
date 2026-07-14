@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections.Generic;
 
 // =============================================================================
 //  POSITION-FIXING PLAYGROUND
@@ -50,7 +51,22 @@ public class TriangulationApp : MonoBehaviour
     float noiseUnit = 0f;                // Method-2 range   noise, std-dev units
     float noiseTdoa = 0f;                // Method-3 range-difference noise, std-dev units
     float noiseLS = 1.0f;                // Method-4 range noise, std-dev units (starts >0 so the ellipse is visible)
+    float noiseTsoa = 0f;                // Method-5 range-sum noise, std-dev units
     float gA = 0.6f, gB = -0.9f, gC = 0.4f; // fixed unit-normal samples per station
+
+    // ---- Method 6 (Kalman filter) state ----
+    bool kfReady = false;                // has the filter been initialised this run?
+    float[,] kfX;                        // state [px,py,vx,vy]^T   (4x1)
+    float[,] kfP;                        // state covariance         (4x4)
+    float kfClock = 0f;                  // drives the true target's motion
+    float kfSinceMeas = 0f;              // time accumulated since last measurement
+    float kfMeasEvery = 0.6f;            // seconds between measurements
+    float kfMeasNoise = 0.9f;            // measurement std-dev (units)
+    float kfProcNoise = 3.0f;            // process-noise intensity (unmodelled accel)
+    Vector2 kfTrue, kfMeas, kfEst;       // latest true / measured / estimated position
+    readonly List<Vector2> kfTrueTrail = new List<Vector2>();
+    readonly List<Vector2> kfEstTrail = new List<Vector2>();
+    readonly List<Vector2> kfMeasDots = new List<Vector2>();
 
     int dragIdx = -1;
     const float mapSpan = 26f;
@@ -149,11 +165,20 @@ public class TriangulationApp : MonoBehaviour
     // =====================================================================
     //  INPUT — drag the active points
     // =====================================================================
-    Rect panelRect = new Rect(10, 10, 660, 620);
+    Rect panelRect = new Rect(10, 10, 660, 700);
 
     void Update()
     {
         ppu = Mathf.Min(Screen.width, Screen.height) / mapSpan;
+
+        if (method == 6)                       // moving-target Kalman demo: no dragging
+        {
+            if (!kfReady) KfInit();
+            KfStep(Time.deltaTime);
+            return;
+        }
+        kfReady = false;                       // reset the filter whenever we leave M6
+
         Vector2 mouse = (Vector2)Input.mousePosition;
         bool overPanel = panelRect.Contains(new Vector2(mouse.x, Screen.height - mouse.y));
 
@@ -256,8 +281,10 @@ public class TriangulationApp : MonoBehaviour
         if (method == 1) DrawMethod1();
         else if (method == 2) DrawMethod2();
         else if (method == 3) DrawMethod3();
-        else DrawMethod4();
-        Marker(pts[2], cTrue, 7f); // true target on top in every method
+        else if (method == 4) DrawMethod4();
+        else if (method == 5) DrawMethod5();
+        else DrawMethod6();
+        if (method != 6) Marker(pts[2], cTrue, 7f); // static true target (M6 has a moving one)
 
         GL.End();
         GL.PopMatrix();
@@ -487,6 +514,190 @@ public class TriangulationApp : MonoBehaviour
     }
 
     // =====================================================================
+    //  METHOD 5 — ELLIPTIC (TSOA: constant SUM of distances)
+    //  The mirror image of TDOA. If we know the SUM of the distances to two
+    //  stations, the target lies on an ELLIPSE with those stations as foci
+    //  (an ellipse is 'all points whose distances to two foci add to a
+    //  constant'). Two ellipses cross at the target. (Bistatic radar.)
+    // =====================================================================
+    float MeasuredSum(int sA, int sB, float g)
+        => (Vector2.Distance(pts[2], pts[sA]) + Vector2.Distance(pts[2], pts[sB])) + g * noiseTsoa;
+
+    void DrawMethod5()
+    {
+        Vector2 A = pts[0], B = pts[1], C = pts[3];
+        Marker(A, cA); Marker(B, cB); Marker(C, cC);
+
+        float sAB = MeasuredSum(0, 1, gA);   // range sum dA + dB
+        float sAC = MeasuredSum(0, 3, gB);   // range sum dA + dC
+        EllipseFoci(A, B, sAB, cB);
+        EllipseFoci(A, C, sAC, cC);
+
+        if (showWork) { Line(A, B, cBase, 1f); Line(A, C, cBase, 1f); } // focal baselines
+        if (SolveTSOA(out Vector2 fix)) Marker(fix, cEst, 9f);
+    }
+
+    // Ellipse { p : dist(p,F1)+dist(p,F2) = sum }. Center M = midpoint; half-focal
+    // c = |F1F2|/2; semi-major a = sum/2; semi-minor b = sqrt(a^2 - c^2). a >= c
+    // always, because the straight path through both foci is the shortest sum.
+    void EllipseFoci(Vector2 F1, Vector2 F2, float sum, Color col)
+    {
+        Vector2 axis = F2 - F1; float focal = axis.magnitude;
+        if (focal < 1e-4f) return;
+        Vector2 u = axis / focal;
+        float c = focal * 0.5f;
+        float a = Mathf.Max(sum * 0.5f, c * 1.0001f);
+        float b = Mathf.Sqrt(Mathf.Max(0f, a * a - c * c));
+        Ellipse((F1 + F2) * 0.5f, a, b, Mathf.Atan2(u.y, u.x), col);
+    }
+
+    // TSOA fix by Gauss-Newton on the two range-SUM equations. Same machinery as
+    // TDOA but the gradient of a SUM of distances is unit(p-A) + unit(p-Si).
+    bool SolveTSOA(out Vector2 fix)
+    {
+        Vector2 A = pts[0], B = pts[1], C = pts[3];
+        float sAB = MeasuredSum(0, 1, gA), sAC = MeasuredSum(0, 3, gB);
+        Vector2 p = (A + B + C) / 3f + new Vector2(0.01f, 0.01f); // nudge off a focus
+        for (int it = 0; it < 60; it++)
+        {
+            Vector2 uA = (p - A).normalized, uB = (p - B).normalized, uC = (p - C).normalized;
+            float r1 = (Vector2.Distance(p, A) + Vector2.Distance(p, B)) - sAB;
+            float r2 = (Vector2.Distance(p, A) + Vector2.Distance(p, C)) - sAC;
+            Vector2 j1 = uA + uB, j2 = uA + uC;
+            float m00 = j1.x * j1.x + j2.x * j2.x, m01 = j1.x * j1.y + j2.x * j2.y, m11 = j1.y * j1.y + j2.y * j2.y;
+            float g0 = j1.x * r1 + j2.x * r2, g1 = j1.y * r1 + j2.y * r2;
+            float det = m00 * m11 - m01 * m01;
+            if (Mathf.Abs(det) < 1e-9f) break;
+            float dx = -(m11 * g0 - m01 * g1) / det, dy = -(m00 * g1 - m01 * g0) / det;
+            p += new Vector2(dx, dy);
+            if (dx * dx + dy * dy < 1e-10f) break;
+        }
+        fix = p; return !(float.IsNaN(p.x) || float.IsNaN(p.y));
+    }
+
+    // =====================================================================
+    //  METHOD 6 — KALMAN FILTER (tracking a moving target over time)
+    //  Method 4 was ONE snapshot. A Kalman filter runs it continuously: it keeps
+    //  a belief (state x + covariance P), PREDICTS it forward with a motion model,
+    //  then CORRECTS it with each noisy measurement. The covariance grows while
+    //  coasting and shrinks at every measurement — the ellipse 'breathes'.
+    //    state x = [px, py, vx, vy] (position + velocity, constant-velocity model)
+    // =====================================================================
+    Vector2 TruePath(float t)                  // smooth looping path so it clearly turns
+        => new Vector2(8f * Mathf.Cos(0.55f * t), 5f * Mathf.Sin(0.8f * t) + 1f);
+
+    void KfInit()
+    {
+        kfClock = 0f; kfSinceMeas = 0f;
+        kfTrue = TruePath(0f); kfMeas = kfTrue; kfEst = kfTrue;
+        kfX = new float[,] { { kfTrue.x }, { kfTrue.y }, { 0f }, { 0f } };
+        kfP = Diag(9f, 9f, 9f, 9f);            // start very uncertain
+        kfTrueTrail.Clear(); kfEstTrail.Clear(); kfMeasDots.Clear();
+        kfReady = true;
+    }
+
+    void KfStep(float dt)
+    {
+        dt = Mathf.Clamp(dt, 0f, 0.1f);        // clamp big frames (e.g. after a stall)
+        if (dt <= 0f) return;
+        kfClock += dt;
+        kfTrue = TruePath(kfClock);
+
+        // ---- PREDICT (every frame):  x = F x ;  P = F P F^T + Q ----
+        float[,] F = { { 1, 0, dt, 0 }, { 0, 1, 0, dt }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } };
+        kfX = Mul(F, kfX);
+        float q = kfProcNoise, dt2 = dt * dt, dt3 = dt2 * dt;
+        float[,] Q =                            // white-noise-acceleration model
+        {
+            { q*dt3/3f, 0,        q*dt2/2f, 0        },
+            { 0,        q*dt3/3f, 0,        q*dt2/2f },
+            { q*dt2/2f, 0,        q*dt,     0        },
+            { 0,        q*dt2/2f, 0,        q*dt     },
+        };
+        kfP = Add(Mul(Mul(F, kfP), Tr(F)), Q);
+
+        // ---- UPDATE (every kfMeasEvery seconds): fold in one noisy position ----
+        kfSinceMeas += dt;
+        if (kfSinceMeas >= kfMeasEvery)
+        {
+            kfSinceMeas -= kfMeasEvery;
+            kfMeas = kfTrue + new Vector2(Gauss(), Gauss()) * kfMeasNoise;
+            kfMeasDots.Add(kfMeas);
+            if (kfMeasDots.Count > 40) kfMeasDots.RemoveAt(0);
+
+            float[,] H = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 } };     // measure position only
+            float rr = kfMeasNoise * kfMeasNoise + 1e-4f;
+            float[,] y = { { kfMeas.x - kfX[0, 0] }, { kfMeas.y - kfX[1, 0] } }; // innovation
+            // S = H P H^T + R  is just the top-left 2x2 of P plus R
+            float s00 = kfP[0, 0] + rr, s01 = kfP[0, 1], s10 = kfP[1, 0], s11 = kfP[1, 1] + rr;
+            float sdet = s00 * s11 - s01 * s10;
+            if (Mathf.Abs(sdet) > 1e-9f)
+            {
+                float[,] Sinv = { { s11 / sdet, -s01 / sdet }, { -s10 / sdet, s00 / sdet } };
+                float[,] PHt = new float[4, 2];                  // P H^T = first two cols of P
+                for (int r = 0; r < 4; r++) { PHt[r, 0] = kfP[r, 0]; PHt[r, 1] = kfP[r, 1]; }
+                float[,] K = Mul(PHt, Sinv);                     // Kalman gain (4x2)
+                kfX = Add(kfX, Mul(K, y));                       // x += K y
+                kfP = Mul(Sub(Ident(4), Mul(K, H)), kfP);        // P = (I - K H) P
+            }
+        }
+
+        kfEst = new Vector2(kfX[0, 0], kfX[1, 0]);
+        kfTrueTrail.Add(kfTrue); if (kfTrueTrail.Count > 240) kfTrueTrail.RemoveAt(0);
+        kfEstTrail.Add(kfEst); if (kfEstTrail.Count > 240) kfEstTrail.RemoveAt(0);
+    }
+
+    void DrawMethod6()
+    {
+        if (!kfReady) return;
+        for (int i = 1; i < kfTrueTrail.Count; i++) Line(kfTrueTrail[i - 1], kfTrueTrail[i], new Color(0.35f, 1f, 0.45f, 0.35f), 1f);
+        for (int i = 1; i < kfEstTrail.Count; i++) Line(kfEstTrail[i - 1], kfEstTrail[i], new Color(1f, 0.25f, 0.45f, 0.9f), 2f);
+        foreach (var m in kfMeasDots) Marker(m, new Color(1, 1, 1, 0.5f), 4f);
+
+        Marker(kfTrue, cTrue, 8f);
+        Marker(kfEst, cEst, 8f);
+        // 2-sigma error ellipse from the POSITION block of the covariance P
+        Eigen(kfP[0, 0], kfP[0, 1], kfP[1, 1], out float sMaj, out float sMin, out float ang);
+        Ellipse(kfEst, 2f * sMaj, 2f * sMin, ang, new Color(1f, 0.25f, 0.45f, 0.9f));
+    }
+
+    // ---- tiny matrix helpers (float[row,col]); vectors are n×1 matrices --------
+    static float[,] Mul(float[,] A, float[,] B)
+    {
+        int n = A.GetLength(0), m = A.GetLength(1), p = B.GetLength(1);
+        var C = new float[n, p];
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < p; j++)
+            {
+                float s = 0f;
+                for (int k = 0; k < m; k++) s += A[i, k] * B[k, j];
+                C[i, j] = s;
+            }
+        return C;
+    }
+    static float[,] Tr(float[,] A)
+    {
+        int n = A.GetLength(0), m = A.GetLength(1); var R = new float[m, n];
+        for (int i = 0; i < n; i++) for (int j = 0; j < m; j++) R[j, i] = A[i, j];
+        return R;
+    }
+    static float[,] Add(float[,] A, float[,] B)
+    {
+        int n = A.GetLength(0), m = A.GetLength(1); var R = new float[n, m];
+        for (int i = 0; i < n; i++) for (int j = 0; j < m; j++) R[i, j] = A[i, j] + B[i, j];
+        return R;
+    }
+    static float[,] Sub(float[,] A, float[,] B)
+    {
+        int n = A.GetLength(0), m = A.GetLength(1); var R = new float[n, m];
+        for (int i = 0; i < n; i++) for (int j = 0; j < m; j++) R[i, j] = A[i, j] - B[i, j];
+        return R;
+    }
+    static float[,] Ident(int n) { var R = new float[n, n]; for (int i = 0; i < n; i++) R[i, i] = 1f; return R; }
+    static float[,] Diag(float a, float b, float c, float d)
+    { var R = new float[4, 4]; R[0, 0] = a; R[1, 1] = b; R[2, 2] = c; R[3, 3] = d; return R; }
+
+    // =====================================================================
     //  UI  (readout panel + floating labels)
     // =====================================================================
     GUIStyle label;
@@ -505,10 +716,17 @@ public class TriangulationApp : MonoBehaviour
         if (label == null) label = new GUIStyle(GUI.skin.label) { fontSize = 26, fontStyle = FontStyle.Bold };
 
         // floating labels
-        Lbl(pts[0], "A", cA);
-        Lbl(pts[1], "B", cB);
-        if (method != 1) Lbl(pts[3], "C", cC);
-        Lbl(pts[2], "true", cTrue);
+        if (method == 6)
+        {
+            if (kfReady) { Lbl(kfTrue, "true", cTrue); Lbl(kfEst, "est", cEst); }
+        }
+        else
+        {
+            Lbl(pts[0], "A", cA);
+            Lbl(pts[1], "B", cB);
+            if (method != 1) Lbl(pts[3], "C", cC);
+            Lbl(pts[2], "true", cTrue);
+        }
 
         GUI.Box(panelRect, "");
         GUILayout.BeginArea(new Rect(panelRect.x + 12, panelRect.y + 10, panelRect.width - 24, panelRect.height - 20));
@@ -522,9 +740,18 @@ public class TriangulationApp : MonoBehaviour
         if (GUILayout.Toggle(method == 3, "M3 TDOA", Btn(), GUILayout.Height(46)) && method != 3) method = 3;
         if (GUILayout.Toggle(method == 4, "M4 best-fit", Btn(), GUILayout.Height(46)) && method != 4) method = 4;
         GUILayout.EndHorizontal();
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Toggle(method == 5, "M5 elliptic", Btn(), GUILayout.Height(46)) && method != 5) method = 5;
+        if (GUILayout.Toggle(method == 6, "M6 Kalman", Btn(), GUILayout.Height(46)) && method != 6) method = 6;
+        GUILayout.EndHorizontal();
         GUILayout.Space(6);
 
-        if (method == 1) Panel1(); else if (method == 2) Panel2(); else if (method == 3) Panel3(); else Panel4();
+        if (method == 1) Panel1();
+        else if (method == 2) Panel2();
+        else if (method == 3) Panel3();
+        else if (method == 4) Panel4();
+        else if (method == 5) Panel5();
+        else Panel6();
 
         GUILayout.Space(8);
         GUILayout.BeginHorizontal();
@@ -539,7 +766,7 @@ public class TriangulationApp : MonoBehaviour
     // Second panel, to the right of the main one: what the current method does, in words.
     void DrawExplain()
     {
-        var box = new Rect(panelRect.xMax + 12, panelRect.y, 640, 560);
+        var box = new Rect(panelRect.xMax + 12, panelRect.y, 640, 660);
         GUI.Box(box, "");
         var area = new Rect(box.x + 14, box.y + 12, box.width - 28, box.height - 24);
         GUILayout.BeginArea(area);
@@ -591,7 +818,7 @@ public class TriangulationApp : MonoBehaviour
             "This locates a phone from cell-tower timing, and drove old LORAN navigation. " +
             "Add noise and the hyperbolas shift, sliding the crossing off the true target.";
 
-        return
+        if (method == 4) return
             "<b>Least-squares fit + error ellipse</b>\n\n" +
             "In the real world every measurement is noisy, so the three range circles never " +
             "meet at one point — there is no exact answer. Instead we look for the position " +
@@ -606,6 +833,36 @@ public class TriangulationApp : MonoBehaviour
             "ellipse; stations bunched on one side give a long stretched one — the same " +
             "noise, but worse geometry. Surveyors call this 'dilution of precision'. Slide " +
             "the noise up and down and drag the stations to feel the ellipse breathe.";
+
+        if (method == 5) return
+            "<b>Elliptic positioning — TSOA</b>\n\n" +
+            "This is the mirror image of the TDOA hyperbolas. Suppose we know the SUM of the " +
+            "distances to two stations (a 'time SUM of arrival' — for example a pulse that " +
+            "bounces off the target from one site to another). The set of points whose " +
+            "distances to two fixed foci ADD UP to a constant is an ELLIPSE with those two " +
+            "stations as its foci.\n\n" +
+            "Pair (A,B) gives one ellipse, pair (A,C) another; the target sits where they " +
+            "cross. Compare with Method 3: DIFFERENCE of distances gave a hyperbola, SUM " +
+            "gives an ellipse — the two classic conic sections, from the two ways of " +
+            "combining a pair of ranges.\n\n" +
+            "This is the geometry behind bistatic radar (transmitter and receiver in " +
+            "different places). Add noise and the ellipses swell or shrink, moving the " +
+            "crossing off the true target.";
+
+        return
+            "<b>Kalman filter — tracking a moving target</b>\n\n" +
+            "Everything so far took ONE snapshot. But targets move, and measurements arrive " +
+            "one after another. The Kalman filter keeps a running BELIEF about the target — " +
+            "its position and velocity — plus how uncertain that belief is (the red ellipse).\n\n" +
+            "Two steps repeat forever. PREDICT: assume the target keeps its velocity and " +
+            "coast the estimate forward; uncertainty GROWS (the ellipse swells). UPDATE: a " +
+            "fresh noisy position (white dots) arrives and we pull the estimate toward it, " +
+            "by an amount that trusts the measurement more when our own uncertainty is high; " +
+            "uncertainty SHRINKS (the ellipse tightens).\n\n" +
+            "Watch the red estimate glide smoothly through the scattered measurements, close " +
+            "to the true green path. Raise 'measurement noise' and it leans on its motion " +
+            "model; raise 'process noise' and it chases each measurement more nervously. " +
+            "This is Method 4 run continuously — the workhorse behind GPS, radar and robots.";
     }
 
     GUIStyle _wrap;
@@ -683,6 +940,40 @@ public class TriangulationApp : MonoBehaviour
         GUILayout.Label($"Ellipse 1σ : {sMaj:0.00} × {sMin:0.00} u", label);
         GUILayout.Label($"Ellipse tilt : {ang * Mathf.Rad2Deg:0.0}°", label);
         NoiseRow(ref noiseLS, 0f, 3f, "Meas. noise", " u");
+    }
+
+    void Panel5()
+    {
+        Vector2 T = pts[2];
+        float sAB = MeasuredSum(0, 1, gA), sAC = MeasuredSum(0, 3, gB);
+        bool ok = SolveTSOA(out Vector2 fix);
+        float err = ok ? Vector2.Distance(fix, T) : -1f;
+
+        GUILayout.Label("<b>Elliptic positioning — TSOA</b>", Rich());
+        GUILayout.Label($"Range sum dA+dB : {sAB:0.00} u", label);
+        GUILayout.Label($"Range sum dA+dC : {sAC:0.00} u", label);
+        Fix(ok, fix, err);
+        NoiseRow(ref noiseTsoa, 0f, 2f, "TSOA noise", " u");
+    }
+
+    void Panel6()
+    {
+        GUILayout.Label("<b>Kalman filter — tracking a mover</b>", Rich());
+        if (!kfReady) { GUILayout.Label("starting…", label); return; }
+        float err = Vector2.Distance(kfEst, kfTrue);
+        float measErr = Vector2.Distance(kfMeas, kfTrue);
+        GUILayout.Label($"True (x,y) : ({kfTrue.x:0.00}, {kfTrue.y:0.00})", label);
+        GUILayout.Label($"Estimate   : ({kfEst.x:0.00}, {kfEst.y:0.00})", label);
+        GUILayout.Label($"Est error : {err:0.000} u", Colored(err));
+        GUILayout.Label($"Last meas error : {measErr:0.000} u", label);
+
+        GUILayout.Space(6);
+        GUILayout.Label($"Measurement noise: {kfMeasNoise:0.0} u", label);
+        kfMeasNoise = GUILayout.HorizontalSlider(kfMeasNoise, 0f, 3f, GUILayout.Height(30));
+        GUILayout.Label($"Process noise: {kfProcNoise:0.0}", label);
+        kfProcNoise = GUILayout.HorizontalSlider(kfProcNoise, 0.1f, 10f, GUILayout.Height(30));
+        GUILayout.Space(6);
+        if (GUILayout.Button("Restart", Btn(), GUILayout.Height(50))) kfReady = false;
     }
 
     void Fix(bool ok, Vector2 fix, float err)
