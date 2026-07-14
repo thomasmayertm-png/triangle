@@ -49,6 +49,7 @@ public class TriangulationApp : MonoBehaviour
     float noiseDeg = 0f;                 // Method-1 bearing noise, std-dev degrees
     float noiseUnit = 0f;                // Method-2 range   noise, std-dev units
     float noiseTdoa = 0f;                // Method-3 range-difference noise, std-dev units
+    float noiseLS = 1.0f;                // Method-4 range noise, std-dev units (starts >0 so the ellipse is visible)
     float gA = 0.6f, gB = -0.9f, gC = 0.4f; // fixed unit-normal samples per station
 
     int dragIdx = -1;
@@ -148,7 +149,7 @@ public class TriangulationApp : MonoBehaviour
     // =====================================================================
     //  INPUT — drag the active points
     // =====================================================================
-    Rect panelRect = new Rect(10, 10, 660, 560);
+    Rect panelRect = new Rect(10, 10, 660, 620);
 
     void Update()
     {
@@ -254,7 +255,8 @@ public class TriangulationApp : MonoBehaviour
         Grid();
         if (method == 1) DrawMethod1();
         else if (method == 2) DrawMethod2();
-        else DrawMethod3();
+        else if (method == 3) DrawMethod3();
+        else DrawMethod4();
         Marker(pts[2], cTrue, 7f); // true target on top in every method
 
         GL.End();
@@ -391,6 +393,99 @@ public class TriangulationApp : MonoBehaviour
         return !(float.IsNaN(p.x) || float.IsNaN(p.y));
     }
 
+    void DrawMethod4()
+    {
+        int[] s = { 0, 1, 3 };
+        float[] g = { gA, gB, gC };
+        Color[] col = { cA, cB, cC };
+        for (int i = 0; i < 3; i++)
+        {
+            float r = Mathf.Max(0.05f, Vector2.Distance(pts[2], pts[s[i]]) + g[i] * noiseLS);
+            Circle(pts[s[i]], r, col[i]);
+            Marker(pts[s[i]], col[i]);
+        }
+
+        if (SolveLS(out Vector2 fix, out float cxx, out float cxy, out float cyy, out _))
+        {
+            Marker(fix, cEst, 9f);
+            Eigen(cxx, cxy, cyy, out float sMaj, out float sMin, out float ang);
+            // Draw the 2-sigma ellipse (semi-axes = 2 x the 1-sigma std devs).
+            Ellipse(fix, 2f * sMaj, 2f * sMin, ang, new Color(1f, 0.25f, 0.45f, 0.9f));
+        }
+    }
+
+    // LEAST-SQUARES range fix by Gauss-Newton over ALL three ranges (3 eqns, 2
+    // unknowns -> over-determined, no exact solution once noisy).
+    //   residual_i = |p - Si| - r_i ,  grad = unit(p - Si).
+    // The normal matrix M = J^T J is the "information"; its inverse scaled by the
+    // measurement variance is the COVARIANCE of the fix:  C = sigma^2 (J^T J)^-1.
+    // Eigen-decomposing C gives the error-ellipse axes. (Good geometry -> small
+    // round ellipse; poor geometry -> large stretched one = high DOP.)
+    bool SolveLS(out Vector2 fix, out float cxx, out float cxy, out float cyy, out float rms)
+    {
+        int[] s = { 0, 1, 3 };
+        float[] g = { gA, gB, gC };
+        float[] r = new float[3];
+        for (int i = 0; i < 3; i++) r[i] = Mathf.Max(0.05f, Vector2.Distance(pts[2], pts[s[i]]) + g[i] * noiseLS);
+
+        Vector2 p = (pts[0] + pts[1] + pts[3]) / 3f;
+        float m00 = 0, m01 = 0, m11 = 0, rss = 0;
+        for (int it = 0; it < 60; it++)
+        {
+            m00 = m01 = m11 = 0; rss = 0; float gg0 = 0, gg1 = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                Vector2 d = p - pts[s[i]];
+                float dist = d.magnitude;
+                Vector2 u = dist > 1e-6f ? d / dist : Vector2.right;
+                float res = dist - r[i];
+                rss += res * res;
+                m00 += u.x * u.x; m01 += u.x * u.y; m11 += u.y * u.y;
+                gg0 += u.x * res; gg1 += u.y * res;
+            }
+            float det = m00 * m11 - m01 * m01;
+            if (Mathf.Abs(det) < 1e-9f) { fix = p; cxx = cyy = cxy = 0; rms = Mathf.Sqrt(rss / 3f); return false; }
+            float dx = -(m11 * gg0 - m01 * gg1) / det;
+            float dy = -(m00 * gg1 - m01 * gg0) / det;
+            p += new Vector2(dx, dy);
+            if (dx * dx + dy * dy < 1e-10f) break;
+        }
+
+        rms = Mathf.Sqrt(rss / 3f);
+        float sigma = Mathf.Max(noiseLS, 1e-4f);         // assumed measurement std
+        float dt = m00 * m11 - m01 * m01, inv = 1f / dt; // (J^T J)^-1 = adj/det
+        cxx = sigma * sigma * m11 * inv;
+        cxy = -sigma * sigma * m01 * inv;
+        cyy = sigma * sigma * m00 * inv;
+        fix = p;
+        return !(float.IsNaN(p.x) || float.IsNaN(p.y));
+    }
+
+    // Eigen-decomposition of the symmetric 2x2 covariance [[cxx,cxy],[cxy,cyy]].
+    // Returns the two 1-sigma semi-axes (sqrt of eigenvalues) and the tilt angle.
+    void Eigen(float cxx, float cxy, float cyy, out float sMaj, out float sMin, out float ang)
+    {
+        float tr = cxx + cyy, det = cxx * cyy - cxy * cxy;
+        float disc = Mathf.Sqrt(Mathf.Max(0f, tr * tr * 0.25f - det));
+        sMaj = Mathf.Sqrt(Mathf.Max(0f, tr * 0.5f + disc));
+        sMin = Mathf.Sqrt(Mathf.Max(0f, tr * 0.5f - disc));
+        ang = 0.5f * Mathf.Atan2(2f * cxy, cxx - cyy);
+    }
+
+    void Ellipse(Vector2 c, float a, float b, float ang, Color col, int seg = 72)
+    {
+        float ca = Mathf.Cos(ang), sa = Mathf.Sin(ang);
+        Vector2 prev = default; bool has = false;
+        for (int i = 0; i <= seg; i++)
+        {
+            float t = i / (float)seg * 2f * Mathf.PI;
+            float lx = a * Mathf.Cos(t), ly = b * Mathf.Sin(t);
+            Vector2 w = c + new Vector2(ca * lx - sa * ly, sa * lx + ca * ly); // rotate then offset
+            if (has) Line(prev, w, col, 2f);
+            prev = w; has = true;
+        }
+    }
+
     // =====================================================================
     //  UI  (readout panel + floating labels)
     // =====================================================================
@@ -422,11 +517,14 @@ public class TriangulationApp : MonoBehaviour
         GUILayout.BeginHorizontal();
         if (GUILayout.Toggle(method == 1, "M1 bearings", Btn(), GUILayout.Height(46)) && method != 1) method = 1;
         if (GUILayout.Toggle(method == 2, "M2 ranges", Btn(), GUILayout.Height(46)) && method != 2) method = 2;
+        GUILayout.EndHorizontal();
+        GUILayout.BeginHorizontal();
         if (GUILayout.Toggle(method == 3, "M3 TDOA", Btn(), GUILayout.Height(46)) && method != 3) method = 3;
+        if (GUILayout.Toggle(method == 4, "M4 best-fit", Btn(), GUILayout.Height(46)) && method != 4) method = 4;
         GUILayout.EndHorizontal();
         GUILayout.Space(6);
 
-        if (method == 1) Panel1(); else if (method == 2) Panel2(); else Panel3();
+        if (method == 1) Panel1(); else if (method == 2) Panel2(); else if (method == 3) Panel3(); else Panel4();
 
         GUILayout.Space(8);
         GUILayout.BeginHorizontal();
@@ -479,7 +577,7 @@ public class TriangulationApp : MonoBehaviour
             "share a point. There is no exact solution any more — the very reason the " +
             "best-fit method (Method 4) has to exist.";
 
-        return
+        if (method == 3) return
             "<b>Multilateration — TDOA hyperbolas</b>\n\n" +
             "Here we can measure neither distance nor direction — only the DIFFERENCE in " +
             "arrival time between a pair of stations: how much FARTHER the target is from " +
@@ -492,6 +590,22 @@ public class TriangulationApp : MonoBehaviour
             "shrink the error (Gauss-Newton) until it settles on the crossing.\n\n" +
             "This locates a phone from cell-tower timing, and drove old LORAN navigation. " +
             "Add noise and the hyperbolas shift, sliding the crossing off the true target.";
+
+        return
+            "<b>Least-squares fit + error ellipse</b>\n\n" +
+            "In the real world every measurement is noisy, so the three range circles never " +
+            "meet at one point — there is no exact answer. Instead we look for the position " +
+            "that comes CLOSEST to all of them at once: the point minimising the total " +
+            "squared miss (least squares). With 3 measurements and 2 unknowns the problem " +
+            "is over-determined, which is exactly what lets the errors average out.\n\n" +
+            "The same computation hands us the UNCERTAINTY for free. The matrix of station " +
+            "directions tells us how measurement noise spreads into position error; its " +
+            "shape, scaled by the noise, is the covariance. Drawing that as an ellipse (red) " +
+            "shows where the true point probably lies.\n\n" +
+            "Notice the shape: stations spread widely around the target give a small round " +
+            "ellipse; stations bunched on one side give a long stretched one — the same " +
+            "noise, but worse geometry. Surveyors call this 'dilution of precision'. Slide " +
+            "the noise up and down and drag the stations to feel the ellipse breathe.";
     }
 
     GUIStyle _wrap;
@@ -548,6 +662,27 @@ public class TriangulationApp : MonoBehaviour
         GUILayout.Label($"Range diff dA-dC : {dAC:0.00} u", label);
         Fix(ok, fix, err);
         NoiseRow(ref noiseTdoa, 0f, 2f, "TDOA noise", " u");
+    }
+
+    void Panel4()
+    {
+        GUILayout.Label("<b>Least-squares fit + error ellipse</b>", Rich());
+        bool ok = SolveLS(out Vector2 fix, out float cxx, out float cxy, out float cyy, out float rms);
+        if (!ok)
+        {
+            GUILayout.Label("Degenerate geometry — no fit", Colored(-1));
+            NoiseRow(ref noiseLS, 0f, 3f, "Meas. noise", " u");
+            return;
+        }
+        Eigen(cxx, cxy, cyy, out float sMaj, out float sMin, out float ang);
+        float err = Vector2.Distance(fix, pts[2]);
+
+        GUILayout.Label($"Best fit (x,y) : ({fix.x:0.00}, {fix.y:0.00})", label);
+        GUILayout.Label($"Error vs true : {err:0.000} u", Colored(err));
+        GUILayout.Label($"RMS residual : {rms:0.000} u", label);
+        GUILayout.Label($"Ellipse 1σ : {sMaj:0.00} × {sMin:0.00} u", label);
+        GUILayout.Label($"Ellipse tilt : {ang * Mathf.Rad2Deg:0.0}°", label);
+        NoiseRow(ref noiseLS, 0f, 3f, "Meas. noise", " u");
     }
 
     void Fix(bool ok, Vector2 fix, float err)
