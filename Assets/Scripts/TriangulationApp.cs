@@ -165,7 +165,7 @@ public class TriangulationApp : MonoBehaviour
     // =====================================================================
     //  INPUT — drag the active points
     // =====================================================================
-    Rect panelRect = new Rect(10, 10, 660, 700);
+    Rect panelRect = new Rect(10, 10, 660, 730);
 
     void Update()
     {
@@ -939,6 +939,7 @@ public class TriangulationApp : MonoBehaviour
         GUILayout.Label($"RMS residual : {rms:0.000} u", label);
         GUILayout.Label($"Ellipse 1σ : {sMaj:0.00} × {sMin:0.00} u", label);
         GUILayout.Label($"Ellipse tilt : {ang * Mathf.Rad2Deg:0.0}°", label);
+        CovReadout(cxx, cxy, cyy);
         NoiseRow(ref noiseLS, 0f, 3f, "Meas. noise", " u");
     }
 
@@ -966,6 +967,7 @@ public class TriangulationApp : MonoBehaviour
         GUILayout.Label($"Estimate   : ({kfEst.x:0.00}, {kfEst.y:0.00})", label);
         GUILayout.Label($"Est error : {err:0.000} u", Colored(err));
         GUILayout.Label($"Last meas error : {measErr:0.000} u", label);
+        CovReadout(kfP[0, 0], kfP[0, 1], kfP[1, 1]);
 
         GUILayout.Space(6);
         GUILayout.Label($"Measurement noise: {kfMeasNoise:0.0} u", label);
@@ -984,6 +986,15 @@ public class TriangulationApp : MonoBehaviour
             GUILayout.Label($"Error vs true : {err:0.000} u", Colored(err));
         }
         else GUILayout.Label("Degenerate geometry — no fix", Colored(-1));
+    }
+
+    // Live covariance matrix readout: the diagonal (spread in x, y) and the
+    // off-diagonal cov(x,y) whose SIGN is the ellipse tilt (+ = ↗, - = ↘).
+    void CovReadout(float cxx, float cxy, float cyy)
+    {
+        GUILayout.Label($"Cov  var x={cxx:0.000}  var y={cyy:0.000}", label);
+        string lean = cxy > 0.0005f ? "leans ↗" : cxy < -0.0005f ? "leans ↘" : "upright";
+        GUILayout.Label($"     cov xy={cxy:+0.000;-0.000;0.000}  ({lean})", label);
     }
 
     void NoiseRow(ref float noise, float lo, float hi, string name, string unit)
