@@ -44,6 +44,7 @@ public class TriangulationApp : MonoBehaviour
 
     int method = 1;                      // 1 = bearings, 2 = ranges
     bool showWork = false;               // reveal the underlying geometry
+    bool showExplain = false;            // show the plain-language explanation panel
 
     float noiseDeg = 0f;                 // Method-1 bearing noise, std-dev degrees
     float noiseUnit = 0f;                // Method-2 range   noise, std-dev units
@@ -428,8 +429,76 @@ public class TriangulationApp : MonoBehaviour
         if (method == 1) Panel1(); else if (method == 2) Panel2(); else Panel3();
 
         GUILayout.Space(8);
-        showWork = GUILayout.Toggle(showWork, "  Show working", Btn(), GUILayout.Height(40));
+        GUILayout.BeginHorizontal();
+        showWork = GUILayout.Toggle(showWork, "Show working", Btn(), GUILayout.Height(40));
+        showExplain = GUILayout.Toggle(showExplain, "Explain", Btn(), GUILayout.Height(40));
+        GUILayout.EndHorizontal();
         GUILayout.EndArea();
+
+        if (showExplain) DrawExplain();
+    }
+
+    // Second panel, to the right of the main one: what the current method does, in words.
+    void DrawExplain()
+    {
+        var box = new Rect(panelRect.xMax + 12, panelRect.y, 640, 560);
+        GUI.Box(box, "");
+        var area = new Rect(box.x + 14, box.y + 12, box.width - 28, box.height - 24);
+        GUILayout.BeginArea(area);
+        GUILayout.Label(ExplainText(), Wrap());
+        GUILayout.EndArea();
+    }
+
+    string ExplainText()
+    {
+        if (method == 1) return
+            "<b>Triangulation — crossing two bearings</b>\n\n" +
+            "Each station (A, B) measures only the DIRECTION to the target — a compass " +
+            "bearing — not the distance. So the target lies somewhere along A's bearing " +
+            "line, and also somewhere along B's. The one point on both lines is where " +
+            "they cross: the fix (red dot).\n\n" +
+            "The angles alpha, beta, gamma are the corners of triangle A-B-target. Given " +
+            "the baseline A-B and two angles, the LAW OF SINES rebuilds the other sides — " +
+            "the same crossing point, reached by algebra instead of by eye.\n\n" +
+            "Add bearing noise: each line tilts a few degrees, so the crossing slips away " +
+            "from the true target (green). Two lines ALWAYS meet at exactly one point, so " +
+            "nothing warns you the answer is wrong — the weakness of using just two lines.";
+
+        if (method == 2) return
+            "<b>Trilateration — three range circles (GPS)</b>\n\n" +
+            "Each station now measures DISTANCE to the target (from signal travel time), " +
+            "but not direction. One distance means 'the target is on a circle of that " +
+            "radius around me.' Two circles cross in two places — ambiguous. A third " +
+            "circle selects the single point common to all three: the fix. This is exactly " +
+            "how GPS works, with satellites playing the part of the stations.\n\n" +
+            "The trick: a circle equation is curved (it has x-squared and y-squared terms). " +
+            "Subtract one circle from another and those squared terms CANCEL, leaving a " +
+            "straight line. Two straight lines cross at the answer with plain arithmetic — " +
+            "no searching. Turn on 'Show working' to see those lines.\n\n" +
+            "Raise the range noise and each radius drifts, so the three circles no longer " +
+            "share a point. There is no exact solution any more — the very reason the " +
+            "best-fit method (Method 4) has to exist.";
+
+        return
+            "<b>Multilateration — TDOA hyperbolas</b>\n\n" +
+            "Here we can measure neither distance nor direction — only the DIFFERENCE in " +
+            "arrival time between a pair of stations: how much FARTHER the target is from " +
+            "one station than from the other. The points with a fixed difference of " +
+            "distances to two fixed points form a HYPERBOLA whose foci are those two " +
+            "stations. Pair (A,B) gives one hyperbola, pair (A,C) another; the target sits " +
+            "where they cross.\n\n" +
+            "Because distances are square roots, the equations won't cancel the way circles " +
+            "did. So we start from a guess and take repeated straight-line steps that " +
+            "shrink the error (Gauss-Newton) until it settles on the crossing.\n\n" +
+            "This locates a phone from cell-tower timing, and drove old LORAN navigation. " +
+            "Add noise and the hyperbolas shift, sliding the crossing off the true target.";
+    }
+
+    GUIStyle _wrap;
+    GUIStyle Wrap()
+    {
+        if (_wrap == null) _wrap = new GUIStyle(GUI.skin.label) { fontSize = 22, richText = true, wordWrap = true };
+        return _wrap;
     }
 
     void Panel1()
